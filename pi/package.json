@@ -1,5 +1,5 @@
 {
-  "name": "arπ-render",
+  "name": "arpi-render",
   "version": "0.1.0",
   "description": "Draw inline figures (SVG fences, PNG paths) in Pi's transcript",
   "type": "module",
