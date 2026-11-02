@@ -9,9 +9,10 @@ test('dark theme backgrounds are used, light ones and junk fall back', () => {
   assert.equal(cardColor(undefined), DEFAULT_CARD)
 })
 
-test('math color uses a light theme text color, else the default', () => {
+test('math color is the theme text color as is, light or dark; junk falls back', () => {
   assert.equal(mathColor('\x1b[38;2;220;215;186m'), '#dcd7ba')
-  assert.equal(mathColor('\x1b[38;2;20;20;20m'), DEFAULT_MATH)
+  assert.equal(mathColor('\x1b[38;2;20;20;20m'), '#141414')
+  assert.equal(mathColor('\x1b[38;2;300;0;0m'), DEFAULT_MATH)
   assert.equal(mathColor(''), DEFAULT_MATH)
   assert.equal(mathColor(undefined), DEFAULT_MATH)
 })

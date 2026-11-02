@@ -310,14 +310,73 @@ test('math and mermaid are left untouched (not [figure]) when graphics are off',
   done()
 })
 
-test('mermaid fence is drawn on the card; unsupported diagrams are left for Pi', opts, () => {
-  const { r, writes, done } = setup()
-  const out = r.transform(`x\n${FLOW}\ny`, { width: 80 })
+// Mermaid converts in a worker, so the fence stays as written until the
+// picture is ready and the host is asked to rebuild.
+function when() {
+  let ready!: () => void
+  const wait = new Promise<void>((res) => (ready = res))
+  return { ready, wait }
+}
+
+test('mermaid fence stays as written, then is drawn on the card once the worker is done', opts, async () => {
+  const w = when()
+  const { r, writes, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { onReady: w.ready })
+  const md = `x\n${FLOW}\ny`
+  assert.equal(r.transform(md, { width: 80 }), md)
+  assert.equal(writes.length, 0)
+  await w.wait
+  const out = r.transform(md, { width: 80 })
   assert.ok(!out.includes('mermaid'))
   assert.ok(rowsOf(out).length >= 2)
   assert.equal(writes.length, 1)
+  assert.equal(r.transform(md, { width: 80 }), out)
+  r.forget()
+  done()
+})
+
+test('unsupported mermaid diagrams are left for Pi', opts, async () => {
+  const { r, writes, dir, done } = setup()
   const pie = '```mermaid\npie title Pets\n "Dogs" : 5\n```'
   assert.equal(r.transform(pie, { width: 80 }), pie)
+  await sleep(500)
+  assert.equal(r.transform(pie, { width: 80 }), pie)
+  assert.equal(writes.length, 0)
+  r.forget()
+  done()
+})
+
+test('a dense mermaid graph is refused at once, with no worker and no wait', opts, async () => {
+  const { r, writes, done } = setup()
+  const layer = (p: string) => Array.from({ length: 20 }, (_v, i) => `${p}${i}`).join(' & ')
+  const md = '```mermaid\ngraph TD\n' + [`${layer('a')} --> ${layer('b')}`, `${layer('b')} --> ${layer('c')}`, `${layer('c')} --> ${layer('a')}`].join('\n') + '\n```'
+  const t0 = Date.now()
+  assert.equal(r.transform(md, { width: 80 }), md)
+  assert.ok(Date.now() - t0 < 100)
+  await sleep(300)
+  assert.equal(r.transform(md, { width: 80 }), md)
+  assert.equal(writes.length, 0)
+  r.forget()
+  done()
+})
+
+test('a layout that times out leaves the fence alone and a marker that later sessions respect', opts, async () => {
+  const { r, writes, dir, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { mermaidTimeoutMs: 1 })
+  const md = FLOW
+  assert.equal(r.transform(md, { width: 80 }), md)
+  await sleep(600)
+  assert.equal(r.transform(md, { width: 80 }), md)
+  const cache = join(dir, 'cache')
+  assert.ok(readdirSync(cache).some((f) => /^m-.*\.fail$/.test(f)))
+  r.forget()
+
+  // A new renderer with a generous deadline does not try again.
+  const w = when()
+  const second = new Renderer({ write: (d) => writes.push(d), env: { AR_TERM_RENDER_IMAGES: '1' }, run: () => null, cacheDir: cache, onReady: w.ready })
+  assert.equal(second.transform(md, { width: 80 }), md)
+  await sleep(500)
+  assert.equal(second.transform(md, { width: 80 }), md)
+  assert.equal(writes.length, 0)
+  second.forget()
   done()
 })
 
@@ -368,5 +427,49 @@ test('pi-tui Markdown, with and without cellmath, shows just the rows for drawn 
       undo?.()
     }
   }
+  done()
+})
+
+// Indented blocks keep their indentation on every row and on the padding,
+// so a list item stays one list item.
+const listWidth = 80
+async function piRender(md: string): Promise<string[]> {
+  const { Markdown } = await import(PI_TUI)
+  const theme = new Proxy({}, { get: () => (x: string) => x })
+  return new Markdown(md, 1, 0, theme, undefined, {}).render(listWidth) as string[]
+}
+const piOpts = { skip: hasRsvg && existsSync(PI_TUI) ? false : 'rsvg or pi-tui missing' }
+const bullets = (lines: string[]) => lines.filter((l) => /^\s*[-•*] /.test(l.replace(/\x1b\[[0-9;]*m/g, ''))).length
+
+test('math and svg in a list item keep the list in one piece', piOpts, async () => {
+  const { r, dir, done } = setup()
+  const png = join(dir, 'p.png')
+  writeFileSync(png, spawnSync('rsvg-convert', ['-f', 'png', '-w', '60', '-h', '30'], { input: SVG('x') }).stdout)
+  for (const [name, item] of [
+    ['math', '  $$x^2$$'],
+    ['svg', `  \`\`\`svg\n  ${SVG('Box')}\n  \`\`\``],
+    ['png', `  ![cap](${png})`],
+  ] as const) {
+    const md = `- item\n${item}\n- next`
+    const out = r.transform(md, { width: listWidth })
+    assert.ok(rowsOf(out).length > 0, name)
+    for (const row of rowsOf(out)) assert.ok(row.startsWith('  '), name)
+    const lines = await piRender(out)
+    assert.equal(bullets(lines), 2, `${name}: still two items`)
+    const rows = lines.filter((l) => l.includes(PLACEHOLDER))
+    assert.equal(rows.length, rowsOf(out).length, name)
+    // Inside the item the rows sit under its text; at column 0 they would
+    // end the list and start a paragraph.
+    const lead = (l: string) => /^ */.exec(l.replace(/\x1b\[[0-9;]*m/g, ''))![0].length
+    const itemLine = lines.find((l) => l.includes('item'))!
+    for (const row of rows) assert.ok(lead(row) > lead(itemLine) + 1, name)
+  }
+  done()
+})
+
+test('indented fallback text and padding carry the indent', () => {
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '0' })
+  const out = r.transform(`- item\n  \`\`\`svg\n  ${SVG('Box')}\n  \`\`\`\n- next`, { width: 80 })
+  assert.equal(out, '- item\n  \n  [figure: Box]\n  \n- next')
   done()
 })

@@ -9,7 +9,7 @@
     "test": "npm run typecheck && npm run build && npm run test:core",
     "test:core": "node --test 'core/**/*.test.ts' 'pi/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
-    "build": "esbuild core/vendor-src/mathjax.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mathjax.cjs --log-level=warning && esbuild core/vendor-src/mermaid.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mermaid.cjs --log-level=warning"
+    "build": "esbuild core/vendor-src/mathjax.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mathjax.cjs --log-level=warning && esbuild core/vendor-src/mermaid-worker.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mermaid-worker.cjs --log-level=warning"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

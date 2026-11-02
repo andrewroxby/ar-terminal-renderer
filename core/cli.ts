@@ -10,7 +10,7 @@ import process from 'node:process'
 import { parseArgs } from 'node:util'
 import type { CleanSvg } from './svg.ts'
 import { mathToSvg } from './math.ts'
-import { mermaidToSvg } from './mermaid.ts'
+import { MERMAID_TIMEOUT_MS, MermaidRunner } from './mermaid.ts'
 import { sanitizeSvg } from './svg.ts'
 import type { Layout } from './layout.ts'
 import { defaultCacheDir, lookup, render } from './raster.ts'
@@ -94,7 +94,7 @@ function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out:
   return out
 }
 
-export function main(argv: string[]): string {
+export async function main(argv: string[]): Promise<string> {
   let parsed
   try {
     parsed = parseArgs({
@@ -141,16 +141,23 @@ export function main(argv: string[]): string {
   }
   if (cmd === 'mermaid') {
     const card = hex('--card', values.card, '#1e1e2e')!
-    const clean = mermaidToSvg(readStdin(), card)
-    if (!clean) throw new Fail('unsupported or invalid Mermaid diagram')
-    return toPng(clean, scale, pad, card, values.output)
+    // The worker is unref'd, so this timer keeps the process up while it runs.
+    const hold = setTimeout(() => {}, MERMAID_TIMEOUT_MS + 1000)
+    const runner = new MermaidRunner()
+    const r = await runner.run(readStdin(), card)
+    runner.close()
+    clearTimeout(hold)
+    if (r.state === 'timeout') throw new Fail(`Mermaid diagram took longer than ${MERMAID_TIMEOUT_MS / 1000} s to lay out`)
+    if (r.state === 'missing') throw new Fail('the Mermaid bundle is missing (run npm run build)')
+    if (r.state !== 'ok') throw new Fail('unsupported or invalid Mermaid diagram')
+    return toPng(r.svg, scale, pad, card, values.output)
   }
   throw new Fail(cmd ? `unknown command ${cmd}` : 'no command given', 2)
 }
 
 if (import.meta.main) {
   try {
-    process.stdout.write(main(process.argv.slice(2)) + '\n')
+    process.stdout.write((await main(process.argv.slice(2))) + '\n')
   } catch (e) {
     if (e instanceof Fail) {
       if (e.code === 0) process.stdout.write(USAGE + '\n')

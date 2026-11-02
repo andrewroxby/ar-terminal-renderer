@@ -4,7 +4,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { GUIDANCE, Renderer, cardColor, mathColor } from '../core/index.ts'
+import { Renderer, cardColor, guidance, mathColor, mermaidAvailable } from '../core/index.ts'
 import type { Cell, Options } from '../core/index.ts'
 
 export interface Deps {
@@ -17,6 +17,7 @@ export interface Deps {
   now?: () => number
   random?: () => number
   env?: NodeJS.ProcessEnv
+  mermaidAvailable?: () => boolean
 }
 
 const REDRAW_JITTER_MS = 2000
@@ -71,11 +72,11 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
   // The guidance line is decided once per session, at the first turn, so the
   // system prompt (and the prompt cache) stays the same afterwards. /render
   // on|off is the deliberate way to change it.
-  let guidance: boolean | undefined
+  let line: string | null | undefined
   pi.on('before_agent_start', (event, ctx) => {
     theme = ctx.ui.theme
-    guidance ??= renderer.enabled && renderer.available().ok
-    return guidance ? { systemPrompt: `${event.systemPrompt}\n\n${GUIDANCE}` } : undefined
+    line ??= renderer.enabled && renderer.available().ok ? guidance((deps.mermaidAvailable ?? mermaidAvailable)()) : null
+    return line ? { systemPrompt: `${event.systemPrompt}\n\n${line}` } : undefined
   })
 
   // tmux-viewer signals `wait-for viewer-changed` when the attached client
@@ -112,7 +113,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
 
   pi.on('session_start', (_event, ctx) => {
     theme = ctx.ui.theme
-    guidance = undefined
+    line = undefined
     stopped = false
     // An empty widget is the only way to get at the TUI for rebuilds.
     ctx.ui.setWidget?.('ar-term-render', (handle) => {
@@ -137,7 +138,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
       const arg = args.trim().toLowerCase()
       if (arg === 'on' || arg === 'off') {
         renderer.enabled = arg === 'on'
-        guidance = undefined
+        line = undefined
         ctx.ui.notify(`render ${arg} (applies to messages drawn from now on)`, 'info')
       } else if (arg === 'redraw') {
         ctx.ui.notify(`render: resent ${renderer.redraw()} image(s)`, 'info')

@@ -94,3 +94,26 @@ test('inline math, trailing text, blank lines, unclosed and fenced math are not 
   none('    $$\n    x\n    $$')
   none('price is $5 and $6')
 })
+
+test('math closes where Pi closes it: a backslash before the closer does not hide it', () => {
+  const math = (md: string) => scan(md, LANGS).filter((b) => b.kind === 'math')
+  const a = '$$a \\\\$$\ntext\n$$b$$'
+  const bs = math(a)
+  assert.equal(bs.length, 2)
+  assert.equal(a.slice(bs[0]!.start, bs[0]!.end), '$$a \\\\$$')
+  assert.equal(a.slice(bs[1]!.start, bs[1]!.end), '$$b$$')
+  const c = '\\[ x \\\\]\nmore prose\n\\]'
+  const cs = math(c)
+  assert.equal(cs.length, 1)
+  assert.equal(c.slice(cs[0]!.start, cs[0]!.end), '\\[ x \\\\]')
+  // A closer that does not end its line is skipped, as in Pi.
+  const d = '$$a$$ b\nc\n$$'
+  assert.equal(d.slice(math(d)[0]!.start, math(d)[0]!.end), d)
+  // A blank line right after the opener still disqualifies the block.
+  assert.deepEqual(math('$$\n\nx\n$$'), [])
+})
+
+test('blocks carry the indentation of their first line', () => {
+  const md = '- item\n  $$x^2$$\n  ```svg\n  <svg/>\n  ```\n  ![p](/a.png)\n$$y$$'
+  assert.deepEqual(scan(md, LANGS).map((b) => [b.kind, b.indent]), [['math', '  '], ['fence', '  '], ['image', '  '], ['math', '']])
+})

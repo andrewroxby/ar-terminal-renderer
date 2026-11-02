@@ -2,7 +2,10 @@
 // draw. Output has an xmlns, a viewBox and no width/height on the root, so
 // the aspect ratio comes from the viewBox alone.
 
+// Model-written SVG is capped at 200 KB. SVG converted from Mermaid or TeX is
+// ours and bulkier, and gets a little more room.
 export const MAX_SVG_BYTES = 200 * 1024
+export const MAX_CONVERTED_BYTES = 300 * 1024
 
 export interface CleanSvg {
   svg: string
@@ -13,8 +16,8 @@ export interface CleanSvg {
 
 const DEFAULT_VIEWBOX = [0, 0, 800, 600] as const
 
-export function sanitizeSvg(source: string): CleanSvg | null {
-  if (Buffer.byteLength(source) > MAX_SVG_BYTES) return null
+export function sanitizeSvg(source: string, maxBytes = MAX_SVG_BYTES): CleanSvg | null {
+  if (Buffer.byteLength(source) > maxBytes) return null
 
   let s = source.trim()
   if (/<!ENTITY/i.test(s)) return null

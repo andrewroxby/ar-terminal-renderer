@@ -3,6 +3,7 @@
 // the SVG is drawn the way its theme intends.
 
 const VAR_DECL = /(--[\w-]+)\s*:\s*([^;"}]+)/g
+const STYLE_REGION = /<style\b[^>]*>([\s\S]*?)<\/style\s*>|\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi
 
 type Rgb = [number, number, number]
 
@@ -68,8 +69,12 @@ function evaluate(expr: string, vars: Map<string, string>, depth = 0): string {
 
 // Replaces every var(...) in the document with its resolved value.
 export function flattenCssVars(svg: string): string {
+  // Only declarations inside <style> blocks and style attributes count, so
+  // diagram text that looks like one cannot recolor the picture.
   const vars = new Map<string, string>()
-  for (const m of svg.matchAll(VAR_DECL)) vars.set(m[1]!, m[2]!.trim())
+  for (const region of svg.matchAll(STYLE_REGION)) {
+    for (const m of (region[1] ?? region[2] ?? region[3] ?? '').matchAll(VAR_DECL)) vars.set(m[1]!, m[2]!.trim())
+  }
 
   let out = ''
   let i = 0

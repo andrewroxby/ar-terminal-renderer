@@ -2,7 +2,7 @@
 // first use.
 
 import { createRequire } from 'node:module'
-import { sanitizeSvg, type CleanSvg } from './svg.ts'
+import { MAX_CONVERTED_BYTES, sanitizeSvg, type CleanSvg } from './svg.ts'
 
 interface MathBundle {
   texToSvg(tex: string, display?: boolean): string
@@ -47,8 +47,9 @@ export function mathToSvg(body: string, color: string, display = true): CleanSvg
   } catch {
     return null
   }
-  if (/href/i.test(raw)) return null
-  const clean = sanitizeSvg(raw)
+  // Attribute syntax only, so \text{href} still draws.
+  if (/\shref\s*=/i.test(raw)) return null
+  const clean = sanitizeSvg(raw, MAX_CONVERTED_BYTES)
   if (!clean) return null
   return { ...clean, svg: clean.svg.replace(/^<svg\b/, `<svg color="${color}"`) }
 }

@@ -57,6 +57,28 @@ function paths(o: RasterOptions): { png: string; fail: string } {
   return { png: `${base}.png`, fail: `${base}.fail` }
 }
 
+// Failure markers for work that has no SVG to key them on, such as a Mermaid
+// diagram that timed out. They expire like the others.
+function markerPath(cacheDir: string, key: string): string {
+  return join(cacheDir, `m-${createHash('sha256').update(key).digest('hex')}.fail`)
+}
+
+export function marked(cacheDir: string, key: string): boolean {
+  const p = markerPath(cacheDir, key)
+  try {
+    if (Date.now() - statSync(p).mtimeMs <= CACHE_MAX_AGE_MS) return true
+    unlinkSync(p)
+  } catch {}
+  return false
+}
+
+export function mark(cacheDir: string, key: string): void {
+  try {
+    mkdirSync(cacheDir, { recursive: true })
+  } catch {}
+  markFailed(markerPath(cacheDir, key))
+}
+
 // Cache check only: never spawns.
 export function lookup(o: RasterOptions): Lookup {
   const p = paths(o)

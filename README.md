@@ -41,11 +41,16 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
   (`mathjax-full`, chosen over MathJax 4's `@mathjax/src` because its CJS
   `js/` tree bundles with esbuild in one command and runs DOM-free through
   `liteAdaptor`). Packages: base, ams, boldsymbol, mathtools, physics, cancel,
-  color, newcommand, upgreek, textmacros, configmacros. It is drawn without a
-  card, in a light text color, at one em per cell height and left aligned.
+  color, upgreek, textmacros. Commands that define or redefine macros
+  (`\newcommand`, `\def`, `\DeclareMathOperator`, `\definecolor` and the
+  like) are left out, because MathJax keeps definitions for the life of the
+  process; a block that uses one keeps its text. Math is drawn without a card,
+  in the theme's text color, at one em per cell height and left aligned.
   `\tag{n}` becomes trailing text. Up to 12 per message.
 - **Mermaid** goes through `beautiful-mermaid` onto the card (catppuccin-mocha
-  palette). Its SVG uses CSS variables and `color-mix()`, which librsvg
+  palette). Layout runs in a worker thread with a 2 s limit, and sources over
+  300 edges or 150 nodes are refused, so no diagram can stall the host. The
+  fence shows as text until its picture is ready. Its SVG uses CSS variables and `color-mix()`, which librsvg
   ignores, so `core/cssvars.ts` resolves them first. It supports flowchart,
   sequence, state, class, ER and xychart; anything else is left for Pi's own
   Unicode Mermaid.

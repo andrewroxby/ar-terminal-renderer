@@ -5,21 +5,20 @@
 
 import { createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
-import { DEFAULT_CARD } from './color.ts'
+import { DEFAULT_CARD, DEFAULT_MATH } from './color.ts'
 import { defaultRun, detectGraphics, tmuxCell, type Availability, type Run } from './env.ts'
 import { DEFAULT_CELL, layout as computeLayout, layoutMath, type Cell, type Layout } from './layout.ts'
 import { mathToSvg } from './math.ts'
-import { mermaidToSvg } from './mermaid.ts'
+import { MermaidRunner, mermaidAvailable, refuseMermaid } from './mermaid.ts'
 import { placeholderRows, transmit, transmitFile } from './kitty.ts'
 import { tryLock } from './lock.ts'
 import { Lru } from './lru.ts'
-import { defaultCacheDir, lookup, render as rasterize, renderAsync, sweep, type RasterOptions } from './raster.ts'
+import { defaultCacheDir, lookup, marked, mark, render as rasterize, renderAsync, sweep, type RasterOptions } from './raster.ts'
 import { scan, type Block } from './scan.ts'
 import { sanitizeSvg } from './svg.ts'
 
 export const MAX_FIGURES = 3
 export const MAX_MATH = 12
-const MATH_COLOR = '#d4d4d4'
 export const MAX_PNG_BYTES = 10 * 1024 * 1024
 export const MAX_PNG_PIXELS = 16_000_000
 export const RASTER_BUDGET_MS = 300
@@ -41,6 +40,7 @@ export interface Options {
   // can rebuild what it drew.
   onReady?: () => void
   budgetMs?: number
+  mermaidTimeoutMs?: number
   lockWaitMs?: number
   retryMs?: number
 }
@@ -63,28 +63,26 @@ interface Source {
   maxScale: number
 }
 
-// A fence kind the renderer knows. Expensive kinds convert through a bundled
-// library, so they wait for the raster budget and fall back to leaving the
-// fence alone. Later phases add entries here.
+// A fence kind the renderer knows. Later phases add entries here.
 interface FenceKind {
   lang: string
-  expensive: boolean
   // Text to show when the figure is not drawn; null leaves the fence as is.
   fallback(b: Extract<Block, { kind: 'fence' }>): string | null
-  toSvg(body: string, card: string): { svg: string; vw: number; vh: number; title: string } | null
+  // Converts on the calling thread. A kind without it converts in the
+  // Mermaid worker, so the fence stays as written until the picture is ready.
+  toSvg?(body: string, card: string): { svg: string; vw: number; vh: number; title: string } | null
 }
 
 const FENCE_KINDS: FenceKind[] = [
   {
     lang: 'svg',
-    expensive: false,
     fallback: (b) => {
       const title = sanitizeSvg(b.body)?.title ?? ''
       return title ? `[figure: ${title}]` : '[figure]'
     },
     toSvg: (body) => sanitizeSvg(body),
   },
-  { lang: 'mermaid', expensive: true, fallback: () => null, toSvg: mermaidToSvg },
+  { lang: 'mermaid', fallback: () => null },
 ]
 
 const PENDING = Symbol('pending')
@@ -93,6 +91,7 @@ export class Renderer {
   enabled = true
   readonly cacheDir: string
   private o: Options
+  private mermaid = new MermaidRunner()
   private env: NodeJS.ProcessEnv
   private run: Run
   private now: () => number
@@ -156,8 +155,10 @@ export class Renderer {
     let maths = 0
     const drawn = blocks.map((b) => {
       if (!draw) return null
-      if (b.kind === 'math') return maths++ < MAX_MATH ? this.draw(b, ctx.width) : null
-      return figures++ < MAX_FIGURES ? this.draw(b, ctx.width) : null
+      // A list item's indent is about what its marker takes from the width.
+      const width = Math.max(4, ctx.width - b.indent.length)
+      if (b.kind === 'math') return maths++ < MAX_MATH ? this.draw(b, width) : null
+      return figures++ < MAX_FIGURES ? this.draw(b, width) : null
     })
     let out = markdown
     for (let i = blocks.length - 1; i >= 0; i--) {
@@ -165,10 +166,13 @@ export class Renderer {
       const d = drawn[i]
       const text = d && d !== PENDING ? d.lines.join('\n') : this.fallback(b)
       if (text === null) continue
-      // Blank lines keep the rows out of a neighboring paragraph.
-      const before = prevLineNonBlank(markdown, b.start) ? '\n' : ''
-      const after = nextLineNonBlank(markdown, b.end) ? '\n' : ''
-      out = out.slice(0, b.start) + before + text + after + out.slice(b.end)
+      // The block's own indentation goes on every row and on the padding, so
+      // a block inside a list item stays in it. The blank lines keep the
+      // rows out of a neighboring paragraph.
+      const pad = b.indent
+      const before = prevLineNonBlank(markdown, b.start) ? pad + '\n' : ''
+      const after = nextLineNonBlank(markdown, b.end) ? '\n' + pad : ''
+      out = out.slice(0, b.start) + before + indented(text, pad) + after + out.slice(b.end)
     }
     return out
   }
@@ -193,6 +197,7 @@ export class Renderer {
     this.unsent.clear()
     this.queue = []
     this.queued.clear()
+    this.mermaid.close()
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
   }
@@ -218,27 +223,44 @@ export class Renderer {
   private draw(b: Block, width: number): Drawn | null | typeof PENDING {
     const cell = this.cell()
     const card = this.o.card?.() ?? DEFAULT_CARD
-    const mathColor = this.o.mathColor?.() ?? MATH_COLOR
+    const mathColor = this.o.mathColor?.() ?? DEFAULT_MATH
     const geom = `${width}|${cell.w}x${cell.h}|${card}|${mathColor}`
 
     let key: string
     let expensive = false
-    let make: () => Source | null
+    let make: () => Source | null = () => null
+    // Set for kinds that convert in the Mermaid worker.
+    let makeAsync: (() => Promise<Source | null | undefined>) | null = null
     let skey: string | null = null
     if (b.kind === 'fence' || b.kind === 'math') {
       const kind = b.kind === 'fence' ? FENCE_KINDS.find((k) => k.lang === b.lang) : undefined
       if (b.kind === 'fence' && !kind) return null
       const digest = createHash('sha256').update((b.kind === 'fence' ? b.lang : '$$') + '\0' + b.body).digest('hex')
-      expensive = b.kind === 'math' || kind!.expensive
+      expensive = b.kind === 'math'
       skey = `${b.kind === 'fence' ? b.lang : 'math'}|${digest}|${card}|${mathColor}`
       key = `${skey}|${width}|${cell.w}x${cell.h}`
-      make = () => {
-        if (b.kind === 'math') {
+      if (b.kind === 'math') {
+        make = () => {
           const m = mathToSvg(b.body, mathColor)
           return m ? { svg: m.svg, vw: m.vw, vh: m.vh, style: 'math', maxScale: 1 } : null
         }
-        const clean = kind!.toSvg(b.body, card)
-        return clean ? { svg: clean.svg, vw: clean.vw, vh: clean.vh, style: 'card', maxScale: 2 } : null
+      } else if (kind!.toSvg) {
+        make = () => {
+          const clean = kind!.toSvg!(b.body, card)
+          return clean ? { svg: clean.svg, vw: clean.vw, vh: clean.vh, style: 'card', maxScale: 2 } : null
+        }
+      } else {
+        // Refusals are decided at once and remembered, in memory and on disk.
+        if (this.sources.get(skey) === undefined && (refuseMermaid(b.body) || !mermaidAvailable() || marked(this.cacheDir, skey))) {
+          this.sources.set(skey, null)
+        }
+        makeAsync = async () => {
+          const r = await this.mermaid.run(b.body, card, this.o.mermaidTimeoutMs)
+          if (r.state === 'closed') return undefined
+          if (r.state === 'bad' || r.state === 'timeout') mark(this.cacheDir, skey!)
+          if (r.state !== 'ok') return null
+          return { svg: r.svg.svg, vw: r.svg.vw, vh: r.svg.vh, style: 'card', maxScale: 2 }
+        }
       }
     } else {
       // Open first and ask the descriptor, so the checks and the read see
@@ -283,6 +305,19 @@ export class Renderer {
 
     let src = skey ? this.sources.get(skey) : undefined
     if (src === undefined) {
+      if (makeAsync) {
+        const convert = makeAsync
+        // The fence stays as written until the picture is ready.
+        this.enqueue(key, async () => {
+          let made = this.sources.get(skey!)
+          if (made === undefined) {
+            made = await convert()
+            if (made !== undefined) this.sources.set(skey!, made)
+          }
+          return made ? (await renderAsync(finish(made))) !== null : false
+        })
+        return PENDING
+      }
       if (expensive && this.spent >= this.budget()) {
         // Convert and rasterize later, off the render path.
         this.enqueue(key, async () => {
@@ -421,6 +456,8 @@ export class Renderer {
     }
   }
 }
+
+const indented = (text: string, pad: string): string => (pad ? text.split('\n').map((l) => pad + l).join('\n') : text)
 
 const figKey = (png: string, cols: number, rows: number): string => `${png}|${cols}x${rows}`
 
