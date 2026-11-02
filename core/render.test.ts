@@ -266,3 +266,107 @@ test('pi-tui Markdown keeps placeholder rows intact', { skip: hasRsvg && existsS
   assert.ok(lines.some((l) => l.includes('Intro')) && lines.some((l) => l.includes('Outro')))
   done()
 })
+
+const MATH = (tex: string) => `$$\n${tex}\n$$`
+const FLOW = '```mermaid\ngraph TD\n A[Start] --> B[End]\n```'
+
+test('display math becomes rows with no card; the $$ text is gone', opts, () => {
+  const { r, writes, done } = setup()
+  const md = `Before\n${MATH('x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}')}\nAfter`
+  const out = r.transform(md, { width: 80 })
+  assert.ok(!out.includes('$$'))
+  assert.ok(rowsOf(out).length >= 1)
+  assert.equal(writes.length, 1)
+  assert.equal(r.transform(md, { width: 80 }), out)
+  assert.equal(writes.length, 1)
+  const lines = out.split('\n')
+  assert.equal(lines[0], 'Before')
+  assert.equal(lines.at(-1), 'After')
+  done()
+})
+
+test('math: inline $..$, code fences and unrenderable TeX are left exactly as written', opts, () => {
+  const { r, writes, done } = setup()
+  for (const md of [
+    'inline $x^2$ stays, and so does $$y$$ inline',
+    '```\n$$\nx\n$$\n```',
+    MATH('\\frac{1}{'),
+    MATH('\\foo{x}'),
+    '$$\nunclosed',
+  ]) {
+    assert.equal(r.transform(md, { width: 80 }), md, md)
+  }
+  assert.equal(writes.length, 0)
+  done()
+})
+
+test('math and mermaid are left untouched (not [figure]) when graphics are off', () => {
+  const { r, writes, done } = setup({ AR_TERM_RENDER_IMAGES: '0' })
+  const md = `${MATH('a=b')}\n\n${FLOW}\n\n\`\`\`svg\n<svg viewBox="0 0 1 1"><title>T</title></svg>\n\`\`\``
+  const out = r.transform(md, { width: 80 })
+  assert.ok(out.startsWith(`${MATH('a=b')}\n\n${FLOW}\n\n`))
+  assert.ok(out.endsWith('[figure: T]'))
+  assert.equal(writes.length, 0)
+  done()
+})
+
+test('mermaid fence is drawn on the card; unsupported diagrams are left for Pi', opts, () => {
+  const { r, writes, done } = setup()
+  const out = r.transform(`x\n${FLOW}\ny`, { width: 80 })
+  assert.ok(!out.includes('mermaid'))
+  assert.ok(rowsOf(out).length >= 2)
+  assert.equal(writes.length, 1)
+  const pie = '```mermaid\npie title Pets\n "Dogs" : 5\n```'
+  assert.equal(r.transform(pie, { width: 80 }), pie)
+  done()
+})
+
+test('math has its own cap (12), separate from the 3 figures', opts, () => {
+  const { r, done } = setup()
+  const eqs = Array.from({ length: 14 }, (_v, i) => MATH(`x_{${i}} = ${i}`)).join('\n\n')
+  const out = r.transform(eqs, { width: 80 })
+  assert.equal(out.match(/x_\{\d+\}/g)!.length, 2, 'two blocks past the cap stay as text')
+  const mixed = r.transform(`${fence('A')}\n\n${fence('B')}\n\n${fence('C')}\n\n${fence('D')}\n\n${MATH('a=b')}`, { width: 80 })
+  assert.match(mixed, /\[figure: D\]/)
+  assert.ok(!mixed.includes('$$'))
+  done()
+})
+
+test('past the budget math waits, is left as text, then draws in the background', opts, async () => {
+  let ready!: () => void
+  const wait = new Promise<void>((res) => (ready = res))
+  const { r, writes, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: -1, onReady: () => ready() })
+  const md = MATH('a = b + c')
+  assert.equal(r.transform(md, { width: 80 }), md)
+  await wait
+  const out = r.transform(md, { width: 80 })
+  assert.ok(rowsOf(out).length >= 1 && !out.includes('$$'))
+  assert.equal(writes.length, 1)
+  done()
+})
+
+// Pi's Markdown must see only plain rows where math was, with or without
+// cellmath's patch on top.
+test('pi-tui Markdown, with and without cellmath, shows just the rows for drawn math', { skip: hasRsvg && existsSync(PI_TUI) ? false : 'rsvg or pi-tui missing' }, async () => {
+  const { Markdown } = await import(PI_TUI)
+  const { r, done } = setup()
+  const out = r.transform(`Intro\n${MATH('\\sum_{i=1}^n i = \\frac{n(n+1)}{2}')}\nOutro`, { width: 78 })
+  const theme = new Proxy({}, { get: () => (x: string) => x })
+  const render = () => new Markdown(out.trim(), 1, 0, theme, undefined, {}).render(80) as string[]
+  const plain = render()
+  const rows = rowsOf(out).length
+  assert.equal(plain.filter((l) => l.includes(PLACEHOLDER)).length, rows)
+  assert.ok(!plain.some((l) => l.includes('$$') || l.includes('∑')))
+
+  const cellmath = join(process.env.HOME ?? '', 'dev/cellmath/pi/patch.ts')
+  if (existsSync(cellmath)) {
+    const { installCellmath } = await import(cellmath)
+    const undo = installCellmath(Markdown.prototype)
+    try {
+      assert.deepEqual(render(), plain)
+    } finally {
+      undo?.()
+    }
+  }
+  done()
+})

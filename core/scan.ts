@@ -5,12 +5,41 @@
 
 export type Block =
   | { kind: 'fence'; lang: string; body: string; start: number; end: number }
+  | { kind: 'math'; body: string; start: number; end: number }
   | { kind: 'image'; alt: string; path: string; start: number; end: number }
 
+// Display math is a `$$` or `\[` that opens a line and closes with the
+// matching delimiter ending a later (or the same) line, with no blank line
+// between. Pi's own LaTeX block tokenizer reads the same shape. Inline math
+// is never matched.
+//
 // start/end are character offsets covering the block's lines, excluding the
 // newline after its last line.
 
 const OPEN = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)[^`]*$/
+const MATH_OPEN = /^ {0,3}(\$\$|\\\[)/
+const MAX_MATH = 8000
+
+// Finds the end of a display math block whose opener starts at `lineStart`.
+function findMath(md: string, lineStart: number, opener: string): { body: string; end: number } | null {
+  const closer = opener === '$$' ? '$$' : '\\]'
+  const bodyStart = md.indexOf(opener, lineStart) + opener.length
+  for (let from = bodyStart; ; ) {
+    const j = md.indexOf(closer, from)
+    if (j < 0 || j - bodyStart > MAX_MATH) return null
+    if (md[j - 1] === '\\') {
+      from = j + closer.length
+      continue
+    }
+    const body = md.slice(bodyStart, j)
+    if (/\n[ \t\r]*\n/.test(body)) return null
+    const nl = md.indexOf('\n', j + closer.length)
+    const end = nl === -1 ? md.length : nl
+    if (md.slice(j + closer.length, end).trim() === '') return body.trim() ? { body, end: md[end - 1] === '\r' ? end - 1 : end } : null
+    from = j + closer.length
+  }
+}
+
 const IMAGE = /^ {0,3}!\[([^\]\n]*)\]\((\/[^)\n]+\.png)\)[ \t]*$/i
 
 export function scan(markdown: string, fenceLangs: ReadonlySet<string>): Block[] {
@@ -43,6 +72,15 @@ export function scan(markdown: string, fenceLangs: ReadonlySet<string>): Block[]
           bodyStart: nl === -1 ? markdown.length : nl + 1,
         }
       } else {
+        const mo = MATH_OPEN.exec(line)
+        const math = mo ? findMath(markdown, pos, mo[1]!) : null
+        if (math) {
+          blocks.push({ kind: 'math', body: math.body, start: pos, end: math.end })
+          const after = markdown.indexOf('\n', math.end)
+          if (after === -1) break
+          pos = after + 1
+          continue
+        }
         const img = IMAGE.exec(line)
         if (img) {
           blocks.push({ kind: 'image', alt: img[1]!.trim(), path: img[2]!.trim(), start: pos, end: lineEnd })

@@ -70,3 +70,9 @@ test('CSS escapes: style content that uses them is dropped, plain style stays', 
   assert.match(r.svg, /\.b\{fill:red\}/)
   assert.match(r.svg, /style="fill:blue"/)
 })
+
+test('@import with a query string and semicolons is removed whole', () => {
+  const r = sanitizeSvg("<svg viewBox=\"0 0 9 9\"><style>@import url('https://f.example/css?family=Inter:wght@400;500;600&amp;display=swap');\ntext{fill:red}</style></svg>")!
+  assert.doesNotMatch(r.svg, /@import|f\.example|500;600/)
+  assert.match(r.svg, /text\{fill:red\}/)
+})

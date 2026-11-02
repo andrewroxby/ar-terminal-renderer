@@ -28,7 +28,7 @@ function harness(env: NodeJS.ProcessEnv, extra: Record<string, unknown> = {}) {
   const widgets: string[] = []
   const ctx = {
     ui: {
-      theme: { getBgAnsi: () => '\x1b[48;2;20;20;30m' },
+      theme: { getFgAnsi: () => "", getBgAnsi: () => '\x1b[48;2;20;20;30m' },
       notify: (m: string) => notes.push(m),
       setWidget: (key: string, factory: (t: typeof tui) => unknown) => {
         widgets.push(key)
@@ -138,7 +138,7 @@ test('a background-rendered figure asks the TUI to rebuild', { skip: hasRsvg ? f
     registerCommand: () => {},
   }
   const tui = { n: 0, invalidate() { this.n++ }, requestRender() {} }
-  const ctx = { ui: { theme: { getBgAnsi: () => '' }, notify() {}, setWidget: (_k: string, f: (t: typeof tui) => unknown) => void f(tui) } }
+  const ctx = { ui: { theme: { getFgAnsi: () => "", getBgAnsi: () => '' }, notify() {}, setWidget: (_k: string, f: (t: typeof tui) => unknown) => void f(tui) } }
   install(api, { env: { AR_TERM_RENDER_IMAGES: '1' }, rendererOptions: { budgetMs: -1, cacheDir: dir, run: () => null } })
   handlers.session_start![0]!({}, ctx)
   assert.match(transformer(SVG_MD, { messageType: 'assistant', isStreaming: false, availableWidth: 80 }), /\[figure: Box\]/)

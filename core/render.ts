@@ -7,7 +7,9 @@ import { createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { DEFAULT_CARD } from './color.ts'
 import { defaultRun, detectGraphics, tmuxCell, type Availability, type Run } from './env.ts'
-import { DEFAULT_CELL, layout as computeLayout, type Cell } from './layout.ts'
+import { DEFAULT_CELL, layout as computeLayout, layoutMath, type Cell, type Layout } from './layout.ts'
+import { mathToSvg } from './math.ts'
+import { mermaidToSvg } from './mermaid.ts'
 import { placeholderRows, transmit, transmitFile } from './kitty.ts'
 import { tryLock } from './lock.ts'
 import { Lru } from './lru.ts'
@@ -16,6 +18,8 @@ import { scan, type Block } from './scan.ts'
 import { sanitizeSvg } from './svg.ts'
 
 export const MAX_FIGURES = 3
+export const MAX_MATH = 12
+const MATH_COLOR = '#d4d4d4'
 export const MAX_PNG_BYTES = 10 * 1024 * 1024
 export const MAX_PNG_PIXELS = 16_000_000
 export const RASTER_BUDGET_MS = 300
@@ -30,6 +34,8 @@ export interface Options {
   cacheDir?: string
   cellFallback?: () => Cell | undefined
   card?: () => string
+  // Text color for display math, which is drawn without a card.
+  mathColor?: () => string
   now?: () => number
   // Called when a figure rendered in the background is ready, so the host
   // can rebuild what it drew.
@@ -51,16 +57,35 @@ interface Source {
   svg: string
   vw: number
   vh: number
+  // card: a padded, letterboxed picture on the card color.
+  // math: bare text-like math, transparent, one em per cell height.
+  style: 'card' | 'math'
   maxScale: number
 }
 
-// A fence kind the renderer knows. Later phases (math, mermaid) add entries.
+// A fence kind the renderer knows. Expensive kinds convert through a bundled
+// library, so they wait for the raster budget and fall back to leaving the
+// fence alone. Later phases add entries here.
 interface FenceKind {
   lang: string
-  toSvg(body: string): { svg: string; vw: number; vh: number; title: string } | null
+  expensive: boolean
+  // Text to show when the figure is not drawn; null leaves the fence as is.
+  fallback(b: Extract<Block, { kind: 'fence' }>): string | null
+  toSvg(body: string, card: string): { svg: string; vw: number; vh: number; title: string } | null
 }
 
-const FENCE_KINDS: FenceKind[] = [{ lang: 'svg', toSvg: sanitizeSvg }]
+const FENCE_KINDS: FenceKind[] = [
+  {
+    lang: 'svg',
+    expensive: false,
+    fallback: (b) => {
+      const title = sanitizeSvg(b.body)?.title ?? ''
+      return title ? `[figure: ${title}]` : '[figure]'
+    },
+    toSvg: (body) => sanitizeSvg(body),
+  },
+  { lang: 'mermaid', expensive: true, fallback: () => null, toSvg: mermaidToSvg },
+]
 
 const PENDING = Symbol('pending')
 
@@ -77,11 +102,12 @@ export class Renderer {
   // alone land on the same entry, so they neither re-id nor re-send.
   private figures = new Lru<string, Drawn>(LRU_CAP, (_k, d) => this.sent.delete(d.id))
   private memo = new Lru<string, Drawn | null>(LRU_CAP)
+  private sources = new Lru<string, Source | null>(LRU_CAP)
   private availMemo: { at: number; v: Availability } | null = null
   private cellMemo: { at: number; v: Cell } | null = null
   private nextId: number
   private spent = 0
-  private queue: { key: string; o: RasterOptions }[] = []
+  private queue: { key: string; run: () => Promise<boolean> }[] = []
   private queued = new Set<string>()
   private draining = false
   private unsent = new Map<number, Drawn>()
@@ -119,19 +145,26 @@ export class Renderer {
 
   transform(markdown: string, ctx: { width: number }): string {
     if (!this.enabled) return markdown
-    if (!markdown.includes('```') && !markdown.includes('~~~') && !markdown.includes('![')) return markdown
+    if (!/```|~~~|!\[|\$\$|\\\[/.test(markdown)) return markdown
     const blocks = scan(markdown, this.langs)
     if (blocks.length === 0) return markdown
 
     this.spent = 0
     const draw = this.available().ok
     // Draw in document order so the raster budget goes to the first figures.
-    const drawn = blocks.map((b, i) => (draw && i < MAX_FIGURES ? this.draw(b, ctx.width) : null))
+    let figures = 0
+    let maths = 0
+    const drawn = blocks.map((b) => {
+      if (!draw) return null
+      if (b.kind === 'math') return maths++ < MAX_MATH ? this.draw(b, ctx.width) : null
+      return figures++ < MAX_FIGURES ? this.draw(b, ctx.width) : null
+    })
     let out = markdown
     for (let i = blocks.length - 1; i >= 0; i--) {
       const b = blocks[i]!
       const d = drawn[i]
       const text = d && d !== PENDING ? d.lines.join('\n') : this.fallback(b)
+      if (text === null) continue
       // Blank lines keep the rows out of a neighboring paragraph.
       const before = prevLineNonBlank(markdown, b.start) ? '\n' : ''
       const after = nextLineNonBlank(markdown, b.end) ? '\n' : ''
@@ -156,6 +189,7 @@ export class Renderer {
     this.sent.clear()
     this.figures.clear()
     this.memo.clear()
+    this.sources.clear()
     this.unsent.clear()
     this.queue = []
     this.queued.clear()
@@ -173,25 +207,38 @@ export class Renderer {
     }
   }
 
-  private fallback(b: Block): string {
+  // What replaces a block that is not drawn. null leaves the original
+  // text in place, for Pi's own math and Mermaid renderers.
+  private fallback(b: Block): string | null {
+    if (b.kind === 'math') return null
     if (b.kind === 'image') return b.alt ? `[image: ${b.alt} - ${b.path}]` : `[image: ${b.path}]`
-    const kind = FENCE_KINDS.find((k) => k.lang === b.lang)
-    const title = kind?.toSvg(b.body)?.title ?? ''
-    return title ? `[figure: ${title}]` : '[figure]'
+    return FENCE_KINDS.find((k) => k.lang === b.lang)?.fallback(b) ?? null
   }
 
   private draw(b: Block, width: number): Drawn | null | typeof PENDING {
     const cell = this.cell()
     const card = this.o.card?.() ?? DEFAULT_CARD
-    const geom = `${width}|${cell.w}x${cell.h}|${card}`
+    const mathColor = this.o.mathColor?.() ?? MATH_COLOR
+    const geom = `${width}|${cell.w}x${cell.h}|${card}|${mathColor}`
 
     let key: string
-    let source: () => Source | null
-    if (b.kind === 'fence') {
-      key = `f|${createHash('sha256').update(b.lang + '\0' + b.body).digest('hex')}|${geom}`
-      source = () => {
-        const clean = FENCE_KINDS.find((k) => k.lang === b.lang)?.toSvg(b.body)
-        return clean ? { svg: clean.svg, vw: clean.vw, vh: clean.vh, maxScale: 2 } : null
+    let expensive = false
+    let make: () => Source | null
+    let skey: string | null = null
+    if (b.kind === 'fence' || b.kind === 'math') {
+      const kind = b.kind === 'fence' ? FENCE_KINDS.find((k) => k.lang === b.lang) : undefined
+      if (b.kind === 'fence' && !kind) return null
+      const digest = createHash('sha256').update((b.kind === 'fence' ? b.lang : '$$') + '\0' + b.body).digest('hex')
+      expensive = b.kind === 'math' || kind!.expensive
+      skey = `${b.kind === 'fence' ? b.lang : 'math'}|${digest}|${card}|${mathColor}`
+      key = `${skey}|${width}|${cell.w}x${cell.h}`
+      make = () => {
+        if (b.kind === 'math') {
+          const m = mathToSvg(b.body, mathColor)
+          return m ? { svg: m.svg, vw: m.vw, vh: m.vh, style: 'math', maxScale: 1 } : null
+        }
+        const clean = kind!.toSvg(b.body, card)
+        return clean ? { svg: clean.svg, vw: clean.vw, vh: clean.vh, style: 'card', maxScale: 2 } : null
       }
     } else {
       // Open first and ask the descriptor, so the checks and the read see
@@ -209,7 +256,7 @@ export class Renderer {
         if (this.memo.has(key)) return this.fromMemo(key)
         const dim = pngSize(fd)
         const data = dim ? readFileSync(fd) : null
-        source = () =>
+        make = () =>
           dim && data
             ? {
                 svg:
@@ -217,6 +264,7 @@ export class Renderer {
                   `<image width="${dim.w}" height="${dim.h}" href="data:image/png;base64,${data.toString('base64')}"/></svg>`,
                 vw: dim.w,
                 vh: dim.h,
+                style: 'card',
                 maxScale: 1,
               }
             : null
@@ -226,22 +274,39 @@ export class Renderer {
     }
 
     if (this.memo.has(key)) return this.fromMemo(key)
-    const src = source()
+
+    const finish = (src: Source): RasterOptions => {
+      const layout: Layout =
+        src.style === 'math' ? layoutMath(src.vw, src.vh, width, cell) : computeLayout(src.vw, src.vh, width, cell, src.maxScale)
+      return { svg: src.svg, layout, bg: src.style === 'math' ? null : card, cacheDir: this.cacheDir }
+    }
+
+    let src = skey ? this.sources.get(skey) : undefined
+    if (src === undefined) {
+      if (expensive && this.spent >= this.budget()) {
+        // Convert and rasterize later, off the render path.
+        this.enqueue(key, async () => {
+          const made = make()
+          if (skey) this.sources.set(skey, made)
+          return made ? (await renderAsync(finish(made))) !== null : false
+        })
+        return PENDING
+      }
+      const t0 = this.now()
+      src = make()
+      this.spent += this.now() - t0
+      if (skey) this.sources.set(skey, src)
+    }
     if (!src) {
       this.memo.set(key, null)
       return null
     }
-    const ro: RasterOptions = {
-      svg: src.svg,
-      layout: computeLayout(src.vw, src.vh, width, cell, src.maxScale),
-      bg: card,
-      cacheDir: this.cacheDir,
-    }
+    const ro = finish(src)
 
     let hit = lookup(ro)
     if (hit.state === 'miss') {
-      if (this.spent >= (this.o.budgetMs ?? RASTER_BUDGET_MS)) {
-        this.enqueue(key, ro)
+      if (this.spent >= this.budget()) {
+        this.enqueue(key, async () => (await renderAsync(ro)) !== null)
         return PENDING
       }
       const t0 = this.now()
@@ -261,6 +326,10 @@ export class Renderer {
     this.memo.set(key, d)
     this.send(d)
     return d
+  }
+
+  private budget(): number {
+    return this.o.budgetMs ?? RASTER_BUDGET_MS
   }
 
   private fromMemo(key: string): Drawn | null {
@@ -291,10 +360,10 @@ export class Renderer {
 
   // Figures past the per-render raster budget render later, one at a time,
   // off the event loop. onReady lets the host rebuild what it drew.
-  private enqueue(key: string, o: RasterOptions): void {
+  private enqueue(key: string, run: () => Promise<boolean>): void {
     if (this.queued.has(key)) return
     this.queued.add(key)
-    this.queue.push({ key, o })
+    this.queue.push({ key, run })
     if (!this.draining) {
       this.draining = true
       setTimeout(() => void this.drain(), 0).unref()
@@ -304,9 +373,10 @@ export class Renderer {
   private async drain(): Promise<void> {
     let ready = false
     for (let item = this.queue.shift(); item; item = this.queue.shift()) {
-      const path = await renderAsync(item.o)
+      try {
+        if (await item.run()) ready = true
+      } catch {}
       this.queued.delete(item.key)
-      if (path) ready = true
     }
     this.draining = false
     if (ready) this.o.onReady?.()

@@ -58,3 +58,39 @@ test('empty body and CRLF', () => {
   const [b] = scan('```svg\r\n<svg/>\r\n```\r\n', LANGS)
   assert.equal(b!.kind === 'fence' && b!.body.trim(), '<svg/>')
 })
+
+test('display math: $$ and \\[ blocks, single and multi line, own lines only', () => {
+  const md = [
+    'a',
+    '$$x^2$$',
+    'b',
+    '$$',
+    '\\frac{a}{b}',
+    '$$',
+    'c',
+    '\\[ y = 1 \\]',
+    'd',
+    '\\[',
+    'z',
+    '\\]',
+  ].join('\n')
+  const bs = scan(md, LANGS).filter((b) => b.kind === 'math')
+  assert.deepEqual(
+    bs.map((b) => (b.kind === 'math' ? b.body.trim() : '')),
+    ['x^2', '\\frac{a}{b}', 'y = 1', 'z'],
+  )
+  assert.equal(md.slice(bs[0]!.start, bs[0]!.end), '$$x^2$$')
+  assert.equal(md.slice(bs[1]!.start, bs[1]!.end), '$$\n\\frac{a}{b}\n$$')
+})
+
+test('inline math, trailing text, blank lines, unclosed and fenced math are not blocks', () => {
+  const none = (md: string) => assert.deepEqual(scan(md, LANGS).filter((b) => b.kind === 'math'), [], md)
+  none('so $x^2$ here and $$y$$ inline')
+  none('$$x$$ and then text')
+  none('$$\na\n\nb\n$$')
+  none('$$\nx')
+  none('\\[ x')
+  none('```\n$$\nx\n$$\n```')
+  none('    $$\n    x\n    $$')
+  none('price is $5 and $6')
+})

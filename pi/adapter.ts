@@ -4,7 +4,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import { GUIDANCE, Renderer, cardColor } from '../core/index.ts'
+import { GUIDANCE, Renderer, cardColor, mathColor } from '../core/index.ts'
 import type { Cell, Options } from '../core/index.ts'
 
 export interface Deps {
@@ -46,6 +46,13 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
           return cardColor(theme?.getBgAnsi('toolPendingBg'))
         } catch {
           return cardColor(undefined)
+        }
+      },
+      mathColor: () => {
+        try {
+          return mathColor(theme?.getFgAnsi('text'))
+        } catch {
+          return mathColor(undefined)
         }
       },
       // A figure that rendered in the background appears when the host

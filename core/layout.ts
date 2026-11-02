@@ -45,3 +45,20 @@ export function layout(vw: number, vh: number, width: number, cell: Cell, maxSca
     top: Math.floor((pxH - fitH) / 2),
   }
 }
+
+// Display math is set at one em per cell height, left-aligned with no card,
+// and shrunk only when it would overflow the box. vw and vh are in MathJax's
+// 1000-units-per-em space.
+export const MATH_EM = 1.0
+
+export function layoutMath(vw: number, vh: number, width: number, cell: Cell): Layout {
+  const maxCols = Math.max(1, Math.min(width - 2, MAX_COLS))
+  const scale = Math.min((cell.h * MATH_EM) / 1000, (maxCols * cell.w) / vw, (MAX_ROWS * cell.h) / vh)
+  const fitW = Math.max(1, Math.round(vw * scale))
+  const fitH = Math.max(1, Math.round(vh * scale))
+  const cols = Math.max(1, Math.min(maxCols, Math.ceil(fitW / cell.w)))
+  const rows = Math.max(1, Math.min(MAX_ROWS, Math.ceil(fitH / cell.h)))
+  const pxW = cols * cell.w
+  const pxH = rows * cell.h
+  return { cols, rows, pxW, pxH, fitW, fitH, left: 0, top: Math.floor((pxH - fitH) / 2) }
+}

@@ -3,8 +3,9 @@
 Draws SVG and PNG pictures inline in a terminal transcript. `core/` is the
 host-neutral engine (no Pi imports); `pi/` is the Pi adapter, `arπ-render`.
 
-Phase 1: closed ```` ```svg ```` fences and standalone `![caption](/abs/path.png)`
-lines in assistant messages. Design and phases: the vault note
+Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
+`![caption](/abs/path.png)` lines, ```` ```mermaid ```` fences and `$$…$$` /
+`\[…\]` display math. Design and phases: the vault note
 `Projects/Tooling/implementation/Inline Figures.md`.
 
 ## How it works
@@ -32,6 +33,28 @@ Rendering is budgeted: past ~300 ms per transform, remaining figures show
 their fallback text and render in the background (async), and the Pi adapter
 asks the TUI to rebuild when they are ready. rsvg failures are remembered as
 `<key>.fail` in the cache for 7 days.
+
+## Math and Mermaid
+
+- **Display math** (`$$…$$` or `\[…\]` opening a line, closing a line, no
+  blank line between; never inline `$…$`) goes through MathJax 3
+  (`mathjax-full`, chosen over MathJax 4's `@mathjax/src` because its CJS
+  `js/` tree bundles with esbuild in one command and runs DOM-free through
+  `liteAdaptor`). Packages: base, ams, boldsymbol, mathtools, physics, cancel,
+  color, newcommand, upgreek, textmacros, configmacros. It is drawn without a
+  card, in a light text color, at one em per cell height and left aligned.
+  `\tag{n}` becomes trailing text. Up to 12 per message.
+- **Mermaid** goes through `beautiful-mermaid` onto the card (catppuccin-mocha
+  palette). Its SVG uses CSS variables and `color-mix()`, which librsvg
+  ignores, so `core/cssvars.ts` resolves them first. It supports flowchart,
+  sequence, state, class, ER and xychart; anything else is left for Pi's own
+  Unicode Mermaid.
+- Where graphics are off or rendering fails, math and mermaid fences are left
+  exactly as written, so cellmath and Pi draw them as before. Only svg and png
+  blocks fall back to `[figure: …]` / `[image: …]`.
+- The libraries are bundled by `npm run build` into `core/vendor/*.cjs`
+  (committed) and loaded lazily with `createRequire`, so no `node_modules`
+  is needed at runtime. `npm test` rebuilds them first.
 
 ## Pi
 

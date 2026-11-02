@@ -10,7 +10,7 @@ declare module '@earendil-works/pi-coding-agent' {
   export interface ExtensionContext {
     ui: {
       notify(message: string, type?: 'info' | 'warning' | 'error'): void
-      theme: { getBgAnsi(color: string): string }
+      theme: { getBgAnsi(color: string): string; getFgAnsi(color: string): string }
       setWidget?(
         key: string,
         factory: (tui: { invalidate(): void; requestRender(force?: boolean): void }) => {

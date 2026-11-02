@@ -42,7 +42,7 @@ export function sanitizeSvg(source: string): CleanSvg | null {
   s = s.replace(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (attr, a: string | undefined, b: string | undefined) =>
     ESCAPE.test(a ?? b ?? '') ? '' : attr,
   )
-  s = s.replace(/@import\b[^;}]*[;}]?/gi, '')
+  s = s.replace(/@import\s*(?:url\([^)]*\)|"[^"]*"|'[^']*')[^;}]*;?/gi, '')
   s = s.replace(/url\(\s*(['"]?)(?!#|data:)[^)]*\)/gi, 'none')
 
   // Re-find the root tag; stripping above never moves it, but offsets shift.

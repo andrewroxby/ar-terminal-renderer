@@ -13,3 +13,16 @@ export function cardColor(bgAnsi: string | undefined): string {
   if (luma > 0.35) return DEFAULT_CARD
   return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')
 }
+
+export const DEFAULT_MATH = '#d4d4d4'
+
+// Math is drawn without a card, straight on the terminal background, so it
+// needs a light text color. Dark or unparseable theme colors fall back.
+export function mathColor(fgAnsi: string | undefined): string {
+  const m = fgAnsi ? /38;2;(\d+);(\d+);(\d+)/.exec(fgAnsi) : null
+  if (!m) return DEFAULT_MATH
+  const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  if (r > 255 || g > 255 || b > 255) return DEFAULT_MATH
+  if ((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5) return DEFAULT_MATH
+  return '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')
+}

@@ -42,7 +42,7 @@ export function sweep(dir: string, maxAgeMs = CACHE_MAX_AGE_MS, now = Date.now()
 export interface RasterOptions {
   svg: string
   layout: Layout
-  bg: string // CSS color for the card
+  bg: string | null // CSS color for the card, or null for transparent
   cacheDir: string
 }
 
@@ -73,8 +73,8 @@ export function lookup(o: RasterOptions): Lookup {
   return { state: 'miss' }
 }
 
-function args(l: Layout, bg: string): string[] {
-  return [
+function args(l: Layout, bg: string | null): string[] {
+  const a = [
     '-f', 'png',
     '-w', String(l.fitW),
     '-h', String(l.fitH),
@@ -82,8 +82,8 @@ function args(l: Layout, bg: string): string[] {
     '--page-height', String(l.pxH),
     '--left', String(l.left),
     '--top', String(l.top),
-    '-b', bg,
   ]
+  return bg ? [...a, '-b', bg] : a
 }
 
 // rsvg runs in an empty directory of its own with the SVG on stdin, so a
