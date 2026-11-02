@@ -1,0 +1,17 @@
+{
+  "name": "ar-term-render",
+  "version": "0.1.0",
+  "description": "Inline figures for Pi: SVG fences and PNG paths drawn in the terminal transcript through kitty graphics, tmux-safe",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "npm run typecheck && npm run test:core",
+    "test:core": "node --test 'core/**/*.test.ts' 'pi/**/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
