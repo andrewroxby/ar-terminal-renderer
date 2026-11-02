@@ -36,14 +36,14 @@ export function normalizeTex(body: string): string {
 }
 
 // Returns a sized SVG drawn in `color`, or null when the TeX does not parse.
-export function mathToSvg(body: string, color: string): CleanSvg | null {
+export function mathToSvg(body: string, color: string, display = true): CleanSvg | null {
   const tex = normalizeTex(body)
   if (!tex || tex.length > MAX_TEX) return null
   const mj = load()
   if (!mj) return null
   let raw: string
   try {
-    raw = mj.texToSvg(tex, true)
+    raw = mj.texToSvg(tex, display)
   } catch {
     return null
   }

@@ -17,5 +17,8 @@
     "esbuild": "^0.28.2",
     "mathjax-full": "^3.2.2",
     "typescript": "^7.0.2"
+  },
+  "bin": {
+    "ar-term-render": "core/cli.ts"
   }
 }

@@ -56,6 +56,21 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
   (committed) and loaded lazily with `createRequire`, so no `node_modules`
   is needed at runtime. `npm test` rebuilds them first.
 
+## CLI
+
+```
+ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--size N] [--scale N] [--padding N] [-o FILE] [LATEX]
+ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   # SVG on stdin
+ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     # diagram on stdin
+```
+
+Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
+short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
+`#cdd6f4` by default, and `--size` / `--scale` match termtex-img's `-s` at
+device scale 2 (one em is size x scale x 1.83 pixels), so Neovim's termtex can
+call it in place of `termtex-img`. A cache miss takes about 120 ms (node 40,
+MathJax load and conversion 40, rsvg 10, TS and argument handling the rest).
+
 ## Pi
 
 Load with `pi -e ~/dev/ar-term-render/pi/index.ts` (nothing is installed into
