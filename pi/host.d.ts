@@ -11,6 +11,13 @@ declare module '@earendil-works/pi-coding-agent' {
     ui: {
       notify(message: string, type?: 'info' | 'warning' | 'error'): void
       theme: { getBgAnsi(color: string): string }
+      setWidget?(
+        key: string,
+        factory: (tui: { invalidate(): void; requestRender(force?: boolean): void }) => {
+          render(width: number): string[]
+          invalidate(): void
+        },
+      ): void
     }
   }
   export interface ExtensionAPI {

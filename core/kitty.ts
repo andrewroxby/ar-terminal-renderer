@@ -32,6 +32,13 @@ export function transmit(id: number, png: Buffer, cols: number, rows: number, tm
   return out
 }
 
+// Transmit by file path (t=f): one escape, no chunking, so nothing can
+// interleave with another process. Only for a terminal that shares this
+// machine's filesystem.
+export function transmitFile(id: number, path: string, cols: number, rows: number, tmux: boolean): string {
+  return apc(`a=T,U=1,f=100,t=f,q=2,i=${id},c=${cols},r=${rows}`, Buffer.from(path).toString('base64'), tmux)
+}
+
 // The image id rides in the foreground color, so rows carry a truecolor SGR.
 export function placeholderRows(id: number, cols: number, rows: number): string[] {
   const fg = `${ESC}[38;2;${(id >> 16) & 255};${(id >> 8) & 255};${id & 255}m`

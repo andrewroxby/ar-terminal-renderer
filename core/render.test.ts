@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readdirSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Renderer } from './render.ts'
+import { Renderer, type Options } from './render.ts'
 import { PLACEHOLDER } from './kitty.ts'
 
 const hasRsvg = spawnSync('rsvg-convert', ['--version']).status === 0
@@ -14,7 +14,7 @@ const SVG = (title: string) =>
   `<svg viewBox="0 0 200 100"><title>${title}</title><rect width="200" height="100" fill="#369"/></svg>`
 const fence = (title: string) => '```svg\n' + SVG(title) + '\n```'
 
-function setup(env: NodeJS.ProcessEnv = { AR_TERM_RENDER_IMAGES: '1' }) {
+function setup(env: NodeJS.ProcessEnv = { AR_TERM_RENDER_IMAGES: '1' }, extra: Partial<Options> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'artr-test-'))
   const writes: string[] = []
   const r = new Renderer({
@@ -22,6 +22,7 @@ function setup(env: NodeJS.ProcessEnv = { AR_TERM_RENDER_IMAGES: '1' }) {
     env,
     run: () => null,
     cacheDir: join(dir, 'cache'),
+    ...extra,
   })
   return { r, writes, dir, done: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -127,5 +128,141 @@ test('rendered PNG is cached on disk and reused by a second renderer', opts, () 
   const r2 = new Renderer({ write: () => {}, env: { AR_TERM_RENDER_IMAGES: '1' }, run: () => null, cacheDir: cache })
   r2.transform(fence('Box'), { width: 80 })
   assert.deepEqual(readdirSync(cache).filter((f) => f.endsWith('.png')), before)
+  done()
+})
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const viewer = (graphics: string) => (_c: string, args: string[]) =>
+  args.includes('@viewer') ? `transport=local device=a client=terminal graphics=${graphics}` : null
+
+test('width changes that keep the layout reuse the id and send nothing', opts, () => {
+  const { r, writes, done } = setup()
+  const md = fence('Box')
+  const a = r.transform(md, { width: 80 })
+  const b = r.transform(md, { width: 120 })
+  assert.equal(a, b)
+  assert.equal(writes.length, 1)
+  assert.equal(r.status().images, 1)
+  // A width that changes the layout is a different image.
+  r.transform(md, { width: 20 })
+  assert.equal(writes.length, 2)
+  assert.equal(r.status().images, 2)
+  done()
+})
+
+test('graphics=file transmits one t=f escape with the cached path; inline chunks', opts, () => {
+  const file = setup({ TMUX: 'x' }, { run: viewer('file') })
+  file.r.transform(fence('Box'), { width: 80 })
+  assert.equal(file.writes.length, 1)
+  const m = /^\x1bPtmux;\x1b\x1b_Ga=T,U=1,f=100,t=f,q=2,i=\d+,c=\d+,r=\d+;([^\x1b]*)\x1b\x1b\\\x1b\\$/.exec(file.writes[0]!)
+  assert.ok(m, 'single wrapped t=f escape')
+  const path = Buffer.from(m![1]!, 'base64').toString()
+  assert.ok(path.startsWith(join(file.dir, 'cache')) && path.endsWith('.png'))
+  file.done()
+
+  const inline = setup({ TMUX: 'x' }, { run: viewer('inline') })
+  inline.r.transform(fence('Box'), { width: 80 })
+  assert.match(inline.writes[0]!, /a=T,U=1,f=100,q=2,/)
+  assert.doesNotMatch(inline.writes[0]!, /t=f/)
+  inline.done()
+
+  const forced = setup({ TMUX: 'x', AR_TERM_RENDER_TRANSPORT: 'inline' }, { run: viewer('file') })
+  forced.r.transform(fence('Box'), { width: 80 })
+  assert.doesNotMatch(forced.writes[0]!, /t=f/)
+  forced.done()
+})
+
+test('inline transmit defers while another process holds the lock, then sends', opts, async () => {
+  const { r, writes, dir, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { lockWaitMs: 20, retryMs: 20 })
+  const lock = join(dir, 'cache', 'transmit.lock')
+  mkdirSync(lock, { recursive: true })
+  const out = r.transform(fence('Box'), { width: 80 })
+  assert.ok(rowsOf(out).length > 0, 'placeholders are drawn at once')
+  assert.equal(writes.length, 0)
+  rmSync(lock, { recursive: true })
+  await sleep(400)
+  assert.equal(writes.length, 1)
+  r.forget()
+  done()
+})
+
+test('a stale lock does not hold up a transmit', opts, () => {
+  const { r, writes, dir, done } = setup({ AR_TERM_RENDER_IMAGES: '1' })
+  const lock = join(dir, 'cache', 'transmit.lock')
+  mkdirSync(lock, { recursive: true })
+  const old = new Date(Date.now() - 10_000)
+  utimesSync(lock, old, old)
+  r.transform(fence('Box'), { width: 80 })
+  assert.equal(writes.length, 1)
+  done()
+})
+
+test('past the raster budget a figure shows its fallback, renders in the background, then draws', opts, async () => {
+  let ready!: () => void
+  const wait = new Promise<void>((res) => (ready = res))
+  const { r, writes, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: -1, onReady: () => ready() })
+  const md = fence('Box')
+  assert.equal(r.transform(md, { width: 80 }).trim(), '[figure: Box]')
+  assert.equal(writes.length, 0)
+  await wait
+  assert.ok(rowsOf(r.transform(md, { width: 80 })).length > 0)
+  assert.equal(writes.length, 1)
+  done()
+})
+
+test('an svg rsvg rejects falls back and leaves a .fail marker', opts, () => {
+  const { r, dir, done } = setup()
+  const out = r.transform('```svg\n<svg viewBox="0 0 9 9"><title>Bad</title><rect></svg>\n```', { width: 80 })
+  assert.equal(out.trim(), '[figure: Bad]')
+  assert.ok(readdirSync(join(dir, 'cache')).some((f) => f.endsWith('.fail')))
+  done()
+})
+
+function pngWith(w: number, h: number): Buffer {
+  const b = Buffer.alloc(33)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b)
+  b.writeUInt32BE(13, 8)
+  b.write('IHDR', 12)
+  b.writeUInt32BE(w, 16)
+  b.writeUInt32BE(h, 20)
+  return b
+}
+
+test('a PNG that would decode past 16M pixels, a fifo and a directory are refused', opts, () => {
+  const { r, dir, done } = setup()
+  const bomb = join(dir, 'bomb.png')
+  writeFileSync(bomb, pngWith(5000, 5000))
+  assert.equal(r.transform(`![](${bomb})`, { width: 80 }).trim(), `[image: ${bomb}]`)
+
+  const fifo = join(dir, 'pipe.png')
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0)
+  assert.equal(r.transform(`![f](${fifo})`, { width: 80 }).trim(), `[image: f - ${fifo}]`)
+
+  const d = join(dir, 'dir.png')
+  mkdirSync(d)
+  assert.equal(r.transform(`![d](${d})`, { width: 80 }).trim(), `[image: d - ${d}]`)
+  done()
+})
+
+// Pi's real Markdown component must keep one placeholder row per line, with
+// the id color, and count each cell as one column.
+const PI_TUI = process.env.PI_TUI_PATH ?? '/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js'
+test('pi-tui Markdown keeps placeholder rows intact', { skip: hasRsvg && existsSync(PI_TUI) ? false : 'rsvg or pi-tui missing' }, async () => {
+  const { Markdown, visibleWidth } = await import(PI_TUI)
+  const { r, done } = setup()
+  const out = r.transform(`Intro\n${fence('Box')}\nOutro`, { width: 78 })
+  const rows = rowsOf(out)
+  const identity = (x: string) => x
+  const theme = new Proxy({}, { get: () => identity })
+  const lines: string[] = new Markdown(out.trim(), 1, 0, theme, undefined, {}).render(80)
+  const drawn = lines.filter((l) => l.includes(PLACEHOLDER))
+  assert.equal(drawn.length, rows.length)
+  const cols = [...rows[0]!.matchAll(new RegExp(PLACEHOLDER, 'g'))].length
+  for (const l of drawn) {
+    assert.match(l, /\x1b\[38;2;\d+;\d+;\d+m/)
+    assert.equal([...l.matchAll(new RegExp(PLACEHOLDER, 'g'))].length, cols)
+    assert.equal(visibleWidth(l), 80)
+  }
+  assert.ok(lines.some((l) => l.includes('Intro')) && lines.some((l) => l.includes('Outro')))
   done()
 })

@@ -26,10 +26,22 @@ export function sanitizeSvg(source: string): CleanSvg | null {
   if (!rootMatch) return null
 
   // Only data: and same-document (#) references survive.
-  s = s.replace(/\s(?:xlink:)?href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (attr, a: string | undefined, b: string | undefined) => {
+  // Any prefix counts (xlink:href, XLINK:HREF, foo:href), and xml:base would
+  // re-root relative references.
+  s = s.replace(/\s[\w.-]*:?href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (attr, a: string | undefined, b: string | undefined) => {
     const value = (a ?? b ?? '').trim()
     return /^(data:|#)/i.test(value) ? attr : ''
   })
+  s = s.replace(/\sxml:base\s*=\s*(?:"[^"]*"|'[^']*')/gi, '')
+  // CSS escapes can spell url( and @import past the checks below, so any
+  // style content that uses them is dropped.
+  const ESCAPE = /\\[0-9a-fA-F]/
+  s = s.replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style\s*>)/gi, (m, open: string, body: string, close: string) =>
+    ESCAPE.test(body) ? open + close : m,
+  )
+  s = s.replace(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (attr, a: string | undefined, b: string | undefined) =>
+    ESCAPE.test(a ?? b ?? '') ? '' : attr,
+  )
   s = s.replace(/@import\b[^;}]*[;}]?/gi, '')
   s = s.replace(/url\(\s*(['"]?)(?!#|data:)[^)]*\)/gi, 'none')
 

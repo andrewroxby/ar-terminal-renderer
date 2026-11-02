@@ -15,14 +15,23 @@ lines in assistant messages. Design and phases: the vault note
   `href`s and CSS `url()`/`@import`.
 - `rsvg-convert` rasterizes onto a card, letterboxed to whole cells, cached
   under `$TMPDIR/ar-term-render/` (7-day expiry).
-- Kitty `a=T,U=1` transmit in 4096-byte chunks, each wrapped for tmux
-  passthrough (`\ePtmux;`, doubled ESC) when `$TMUX` is set. The Markdown gets
+- Kitty `a=T,U=1` transmit, each escape wrapped for tmux passthrough
+  (`\ePtmux;`, doubled ESC) when `$TMUX` is set. A local viewer
+  (`graphics=file`) gets one `t=f` escape carrying the cached PNG's path;
+  others get 4096-byte chunks sent under a cross-process lock in the cache
+  directory (continuation chunks carry no id). `AR_TERM_RENDER_TRANSPORT`
+  forces `inline` or `file`. The Markdown gets
   Unicode placeholder rows whose foreground color is the image id. No
   terminal queries are ever sent.
 - Availability: `tmux show -gv @viewer` (`graphics=file|inline` draws), else
   the tmux client terminal, else Ghostty/kitty outside tmux.
   `AR_TERM_RENDER_IMAGES=0|1` overrides. Fallback text is `[figure: title]` or
   `[image: alt - path]`.
+
+Rendering is budgeted: past ~300 ms per transform, remaining figures show
+their fallback text and render in the background (async), and the Pi adapter
+asks the TUI to rebuild when they are ready. rsvg failures are remembered as
+`<key>.fail` in the cache for 7 days.
 
 ## Pi
 

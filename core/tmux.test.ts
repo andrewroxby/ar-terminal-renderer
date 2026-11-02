@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { transmit, placeholderRows, PLACEHOLDER } from './kitty.ts'
+import { transmit, transmitFile, placeholderRows, PLACEHOLDER } from './kitty.ts'
 import { DIACRITICS } from './diacritics.ts'
 
 const SOCKET = 'artr-test'
@@ -19,16 +19,18 @@ const can = spawnSync('tmux', ['-V']).status === 0 && spawnSync('python3', ['--v
 const ID = 0x123456
 const RAW_ID = 0x654321
 
-function run(mode: 'on' | 'all', hidden: boolean): string {
+function run(mode: 'on' | 'all', hidden: boolean, build?: () => string): string {
   const dir = mkdtempSync(join(tmpdir(), 'artr-tmux-'))
   try {
     const png = Buffer.alloc(5000, 7) // two 4096-byte chunks
-    const payload = [
-      ...transmit(ID, png, 3, 2, true),
-      // A bare APC, which tmux must not forward.
-      `\x1b_Ga=T,U=1,f=100,q=2,i=${RAW_ID};AAAA\x1b\\`,
-      ...placeholderRows(ID, 3, 2).map((l) => l + '\r\n'),
-    ].join('')
+    const payload =
+      build?.() ??
+      [
+        ...transmit(ID, png, 3, 2, true),
+        // A bare APC, which tmux must not forward.
+        `\x1b_Ga=T,U=1,f=100,q=2,i=${RAW_ID};AAAA\x1b\\`,
+        ...placeholderRows(ID, 3, 2).map((l) => l + '\r\n'),
+      ].join('')
     const file = join(dir, 'payload')
     writeFileSync(file, payload)
     const r = spawnSync('python3', [HARNESS, SOCKET, mode, hidden ? '1' : '0', file], {
@@ -63,4 +65,13 @@ test('hidden window: dropped under allow-passthrough on, delivered under all', {
   const all = utf8(run('all', true))
   assert.ok(!on.includes(`i=${ID}`), 'on drops a hidden-window transmit')
   assert.ok(all.includes(`i=${ID}`), 'all delivers it')
+})
+
+test('file transmit (t=f) arrives through passthrough as one intact escape', { skip: can ? false : 'tmux/python3 missing' }, () => {
+  const path = '/var/folders/zz/T/ar-term-render/0123456789abcdef.png'
+  const text = utf8(run('all', false, () => transmitFile(ID, path, 3, 2, true) + placeholderRows(ID, 3, 2).join('\r\n') + '\r\n'))
+  const expected = `\x1b_Ga=T,U=1,f=100,t=f,q=2,i=${ID},c=3,r=2;${Buffer.from(path).toString('base64')}\x1b\\`
+  assert.ok(text.includes(expected), 'APC with the base64 path reached the client intact')
+  assert.ok(!text.includes('\x1bPtmux;'))
+  assert.ok(text.includes(PLACEHOLDER + DIACRITICS[1] + DIACRITICS[2]))
 })

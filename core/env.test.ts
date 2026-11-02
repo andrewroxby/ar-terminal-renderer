@@ -34,3 +34,13 @@ test('tmux cell size is used only when set', () => {
   assert.equal(tmuxCell(() => '0 0'), null)
   assert.equal(tmuxCell(() => null), null)
 })
+
+test('transport mode: file only for a local viewer, inline otherwise, env can force', () => {
+  const t = { TMUX: 'x' }
+  assert.equal(detectGraphics(t, tmuxRun('transport=local graphics=file')).mode, 'file')
+  assert.equal(detectGraphics(t, tmuxRun('transport=et graphics=inline')).mode, 'inline')
+  assert.equal(detectGraphics(t, tmuxRun(null, 'xterm-ghostty')).mode, 'inline')
+  assert.equal(detectGraphics({ TERM_PROGRAM: 'ghostty' }, () => null).mode, 'inline')
+  assert.equal(detectGraphics({ ...t, AR_TERM_RENDER_TRANSPORT: 'inline' }, tmuxRun('graphics=file')).mode, 'inline')
+  assert.equal(detectGraphics({ ...t, AR_TERM_RENDER_TRANSPORT: 'file' }, tmuxRun('graphics=inline')).mode, 'file')
+})

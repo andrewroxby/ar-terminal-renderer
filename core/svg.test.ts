@@ -51,3 +51,22 @@ test('removes scripts and any prolog', () => {
   assert.match(r.svg, /^<svg /)
   assert.doesNotMatch(r.svg, /script/)
 })
+
+test('prefixed and odd-cased href attributes are stripped unless data: or #', () => {
+  const r = sanitizeSvg(
+    '<svg viewBox="0 0 9 9"><image XLINK:HREF="file:///etc/passwd"/><image foo:href="http://x/y"/><image bar.baz:href="/etc/hosts"/><use foo:href="#ok"/><image xml:base="file:///etc/" href="data:image/png;base64,AA"/></svg>',
+  )!
+  assert.doesNotMatch(r.svg, /etc|http:\/\/x\//)
+  assert.doesNotMatch(r.svg, /xml:base/)
+  assert.match(r.svg, /foo:href="#ok"/)
+  assert.match(r.svg, /href="data:image\/png;base64,AA"/)
+})
+
+test('CSS escapes: style content that uses them is dropped, plain style stays', () => {
+  const r = sanitizeSvg(
+    '<svg viewBox="0 0 9 9"><style>.a{fill:u\\72l(file:///etc/passwd)}</style><rect style="fill:\\75rl(http://e/x)"/><style>.b{fill:red}</style><rect style="fill:blue"/></svg>',
+  )!
+  assert.doesNotMatch(r.svg, /etc\/passwd|e\/x\)/)
+  assert.match(r.svg, /\.b\{fill:red\}/)
+  assert.match(r.svg, /style="fill:blue"/)
+})

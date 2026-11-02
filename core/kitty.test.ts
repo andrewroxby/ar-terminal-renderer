@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { transmit, placeholderRows, wrapTmux, PLACEHOLDER, CHUNK } from './kitty.ts'
+import { transmit, transmitFile, placeholderRows, wrapTmux, PLACEHOLDER, CHUNK } from './kitty.ts'
 import { DIACRITICS } from './diacritics.ts'
 
 const unwrap = (s: string) => s.slice('\x1bPtmux;'.length, -2).replaceAll('\x1b\x1b', '\x1b')
@@ -57,4 +57,10 @@ test('placeholder rows: one per row, cols cells each, id in the fg color', () =>
 
 test('too large a grid yields no rows', () => {
   assert.deepEqual(placeholderRows(1, DIACRITICS.length + 1, 1), [])
+})
+
+test('file transmit is one escape carrying the base64 path, wrapped under tmux', () => {
+  const plain = transmitFile(5, '/tmp/x y/a.png', 4, 2, false)
+  assert.equal(plain, `\x1b_Ga=T,U=1,f=100,t=f,q=2,i=5,c=4,r=2;${Buffer.from('/tmp/x y/a.png').toString('base64')}\x1b\\`)
+  assert.equal(unwrap(transmitFile(5, '/tmp/x y/a.png', 4, 2, true)), plain)
 })
