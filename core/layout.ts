@@ -46,10 +46,11 @@ export function layout(vw: number, vh: number, width: number, cell: Cell, maxSca
   }
 }
 
-// Display math is set at one em per cell height, left-aligned with no card,
-// and shrunk only when it would overflow the box. vw and vh are in MathJax's
-// 1000-units-per-em space.
-export const MATH_EM = 1.0
+// Display math is set at 0.8 em per cell height, which roughly matches the
+// terminal font's own letters, left-aligned with no card, and shrunk only
+// when it would overflow the box. vw and vh are in MathJax's 1000-units-per-em
+// space.
+export const MATH_EM = 0.8
 
 export function layoutMath(vw: number, vh: number, width: number, cell: Cell): Layout {
   const maxCols = Math.max(1, Math.min(width - 2, MAX_COLS))

@@ -43,9 +43,9 @@ test('\\tag becomes trailing text', () => {
   assert.equal(normalizeTex('  a  '), 'a')
 })
 
-test('math layout: one em per cell height, left aligned, shrinks only to fit', () => {
+test('math layout: 0.8 em per cell height, left aligned, shrinks only to fit', () => {
   const cell = { w: 9, h: 18 }
-  const small = layoutMath(2000, 1000, 80, cell) // 2 em wide, 1 em tall
+  const small = layoutMath(2500, 1250, 80, cell) // 2.5 em wide, 1.25 em tall
   assert.equal(small.fitW, 36)
   assert.equal(small.fitH, 18)
   assert.equal(small.left, 0)

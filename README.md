@@ -45,7 +45,8 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
   (`\newcommand`, `\def`, `\DeclareMathOperator`, `\definecolor` and the
   like) are left out, because MathJax keeps definitions for the life of the
   process; a block that uses one keeps its text. Math is drawn without a card,
-  in the theme's text color, at one em per cell height and left aligned.
+  in the theme's text color, at 0.8 em per cell height (about the size of the
+  terminal's own letters) and left aligned.
   `\tag{n}` becomes trailing text. Up to 12 per message.
 - **Mermaid** goes through `beautiful-mermaid` onto the card (catppuccin-mocha
   palette). Layout runs in a worker thread with a 2 s limit, and sources over

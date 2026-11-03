@@ -58,7 +58,7 @@ interface Source {
   vw: number
   vh: number
   // card: a padded, letterboxed picture on the card color.
-  // math: bare text-like math, transparent, one em per cell height.
+  // math: bare text-like math, transparent, 0.8 em per cell height.
   style: 'card' | 'math'
   maxScale: number
 }
