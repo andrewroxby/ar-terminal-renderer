@@ -43,17 +43,18 @@ test('\\tag becomes trailing text', () => {
   assert.equal(normalizeTex('  a  '), 'a')
 })
 
-test('math layout: 0.8 em per cell height, left aligned, shrinks only to fit', () => {
+test('math layout: 0.8 em per cell height, two-cell indent, shrinks only to fit', () => {
   const cell = { w: 9, h: 18 }
   const small = layoutMath(2500, 1250, 80, cell) // 2.5 em wide, 1.25 em tall
   assert.equal(small.fitW, 36)
   assert.equal(small.fitH, 18)
-  assert.equal(small.left, 0)
+  assert.equal(small.left, 18)
   assert.equal(small.rows, 1)
-  assert.equal(small.cols, 4)
+  assert.equal(small.cols, 6)
   const wide = layoutMath(200_000, 1000, 40, cell)
   assert.equal(wide.cols, 38)
-  assert.ok(wide.fitW <= 38 * 9)
+  assert.ok(wide.left + wide.fitW <= 38 * 9)
+  assert.equal(layoutMath(2500, 1250, 10, cell).left, 0) // too narrow to indent
 })
 
 // MathJax's macro maps are shared by the whole process, so a definition in
