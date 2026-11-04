@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { mathToSvg, normalizeTex } from './math.ts'
-import { layoutMath } from './layout.ts'
+import { layoutMath as layoutMathOrNull, type Cell } from './layout.ts'
 import { MATH_CASES, BAD_MATH } from './test/math-cases.ts'
 
 const hasRsvg = spawnSync('rsvg-convert', ['--version']).status === 0
@@ -43,6 +43,8 @@ test('\\tag becomes trailing text', () => {
   assert.equal(normalizeTex('  a  '), 'a')
 })
 
+const layoutMath = (vw: number, vh: number, width: number, cell: Cell, indent = 0) => layoutMathOrNull(vw, vh, width, cell, indent)!
+
 test('math layout: 0.8 em per cell height, indented, shrinks only to fit', () => {
   const cell = { w: 9, h: 18 }
   const small = layoutMath(2500, 1250, 80, cell, 2) // 2.5 em wide, 1.25 em tall
@@ -58,12 +60,12 @@ test('math layout: 0.8 em per cell height, indented, shrinks only to fit', () =>
 test('math that would shrink under the indent sits flush left at full width', () => {
   const cell = { w: 9, h: 18 }
   // Too wide for 40 columns: indenting would shrink it.
-  const flush = layoutMath(200_000, 1000, 40, cell, 2)
+  const flush = layoutMath(30_000, 1000, 40, cell, 2)
   assert.equal(flush.left, 0)
   assert.equal(flush.cols, 38)
   assert.equal(flush.fitW, 38 * 9)
-  // The same formula in 190 columns is capped at 100 columns either way, so it is indented.
-  const roomy = layoutMath(200_000, 1000, 190, cell, 2)
+  // A wider formula in 190 columns is capped at 100 columns either way, so it is indented.
+  const roomy = layoutMath(70_000, 1000, 190, cell, 2)
   assert.equal(roomy.left, 18)
   assert.equal(roomy.cols, 102)
   assert.equal(roomy.fitW, 100 * 9)
@@ -71,6 +73,18 @@ test('math that would shrink under the indent sits flush left at full width', ()
   assert.equal(layoutMath(22_000, 1000, 40, cell, 2).left, 18) // 317 px, room for 324
   assert.equal(layoutMath(23_000, 1000, 40, cell, 2).left, 0) // 331 px, fits flush (342) but not indented
   assert.equal(layoutMath(2500, 1250, 10, cell, 2).left, 18) // a small formula fits even in a narrow pane
+})
+
+test('math that would shrink below 0.5 em per cell height is refused', () => {
+  const cell = { w: 9, h: 18 }
+  // 38 columns is 342 px, which holds 38 em at the floor (9 px per em).
+  assert.ok(layoutMathOrNull(37_000, 1000, 40, cell, 2))
+  assert.equal(layoutMathOrNull(39_000, 1000, 40, cell, 2), null)
+  assert.equal(layoutMathOrNull(200_000, 1000, 190, cell, 2), null)
+  // Too tall for 30 rows at the floor.
+  assert.equal(layoutMathOrNull(1000, 70_000, 80, cell, 2), null)
+  // Dropping the indent can bring a formula back above the floor.
+  assert.equal(layoutMathOrNull(37_500, 1000, 40, cell, 2)!.left, 0)
 })
 
 // MathJax's macro maps are shared by the whole process, so a definition in

@@ -1,11 +1,11 @@
 {
   "name": "arpi-render",
   "version": "0.1.0",
-  "description": "Draw inline figures (SVG fences, PNG paths) in Pi's transcript",
+  "description": "arπ-render: draws SVG fences, PNG paths, Mermaid diagrams and display math in Pi's transcript",
   "type": "module",
   "private": true,
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension", "svg", "images"],
+  "keywords": ["pi-package", "pi-extension", "svg", "images", "math", "mermaid"],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"

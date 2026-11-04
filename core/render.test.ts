@@ -186,6 +186,23 @@ test('inline transmit defers while another process holds the lock, then sends', 
   done()
 })
 
+test('a held lock costs one wait per pass, not one per image', opts, async () => {
+  const { r, writes, dir, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { lockWaitMs: 150, retryMs: 20 })
+  r.transform(['A', 'B', 'C'].map((t) => fence(t)).join('\n\n'), { width: 80 })
+  assert.equal(writes.length, 3)
+  const lock = join(dir, 'cache', 'transmit.lock')
+  mkdirSync(lock, { recursive: true })
+  const t0 = Date.now()
+  assert.equal(r.redraw(), 3)
+  assert.ok(Date.now() - t0 < 280, `redraw blocked for ${Date.now() - t0} ms`)
+  assert.equal(writes.length, 3)
+  rmSync(lock, { recursive: true })
+  await sleep(500)
+  assert.equal(writes.length, 6, 'the queued images go out once the lock frees')
+  r.forget()
+  done()
+})
+
 test('a stale lock does not hold up a transmit', opts, () => {
   const { r, writes, dir, done } = setup({ AR_TERM_RENDER_IMAGES: '1' })
   const lock = join(dir, 'cache', 'transmit.lock')
@@ -391,6 +408,15 @@ test('math has its own cap (12), separate from the 3 figures', opts, () => {
   done()
 })
 
+test('math that would have to shrink below legibility is left as text', opts, () => {
+  const { r, writes, done } = setup()
+  const wide = MATH(Array.from({ length: 40 }, (_v, i) => `a_{${i}}`).join(' + '))
+  assert.equal(r.transform(wide, { width: 30 }), wide)
+  assert.equal(writes.length, 0)
+  assert.ok(rowsOf(r.transform(wide, { width: 100 })).length >= 1, 'the same formula draws in a wide pane')
+  done()
+})
+
 test('past the budget math waits, is left as text, then draws in the background', opts, async () => {
   let ready!: () => void
   const wait = new Promise<void>((res) => (ready = res))
@@ -501,7 +527,7 @@ async function colsAt(md: string, width: number, indent?: number): Promise<numbe
 }
 
 const WIDE_SVG = '```svg\n<svg viewBox="0 0 1800 300"><rect width="1800" height="300" fill="#369"/></svg>\n```'
-const WIDE_MATH = MATH(Array.from({ length: 60 }, (_, i) => `a_{${i}}`).join(' + '))
+const WIDE_MATH = MATH(Array.from({ length: 14 }, (_, i) => `a_{${i}}`).join(' + '))
 const WIDE_FLOW = '```mermaid\nflowchart LR\n  A[Receive request] --> B[Parse payload] --> C[Validate fields] --> D[Transform records] --> E[Store results] --> F[Send notification]\n  C --> G[Reject request]\n```'
 const SMALL_MATH = MATH('x^2')
 const SMALL_FLOW = '```mermaid\nflowchart LR\n  A --> B\n```'

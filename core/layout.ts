@@ -41,11 +41,11 @@ interface Fit {
 
 // Laying out with `indent` cells of blank space is kept only if it leaves the
 // figure as large as laying it out flush.
-function indentedUnlessShrunk(fit: (indent: number) => Fit, indent: number): Layout {
+function indentedUnlessShrunk(fit: (indent: number) => Fit, indent: number): Fit {
   const flush = fit(0)
-  if (indent <= 0) return flush.l
+  if (indent <= 0) return flush
   const ind = fit(indent)
-  return ind.scale < flush.scale - 1e-9 ? flush.l : ind.l
+  return ind.scale < flush.scale - 1e-9 ? flush : ind
 }
 
 export function layout(vw: number, vh: number, width: number, cell: Cell, maxScale: number, indent = 0): Layout {
@@ -76,15 +76,18 @@ export function layout(vw: number, vh: number, width: number, cell: Cell, maxSca
       },
     }
   }
-  return indentedUnlessShrunk(fit, indent)
+  return indentedUnlessShrunk(fit, indent).l
 }
 
 // Display math is set at 0.8 em per cell height, which roughly matches the
 // terminal font's own letters, with no card, and shrunk only when it would
 // overflow the box. vw and vh are in MathJax's 1000-units-per-em space.
+// Below MATH_EM_FLOOR em per cell height it is too small to read, so the
+// layout is refused (null) and the caller leaves the text for cellmath.
 export const MATH_EM = 0.8
+export const MATH_EM_FLOOR = 0.5
 
-export function layoutMath(vw: number, vh: number, width: number, cell: Cell, indent = 0): Layout {
+export function layoutMath(vw: number, vh: number, width: number, cell: Cell, indent = 0): Layout | null {
   const fit = (ind: number): Fit => {
     const maxCols = Math.max(1, Math.min(width - 2 - ind, MAX_COLS))
     const scale = Math.min((cell.h * MATH_EM) / 1000, (maxCols * cell.w) / vw, (MAX_ROWS * cell.h) / vh)
@@ -96,5 +99,6 @@ export function layoutMath(vw: number, vh: number, width: number, cell: Cell, in
     const pxH = rows * cell.h
     return { scale, l: { cols, rows, pxW, pxH, fitW, fitH, left: ind * cell.w, top: Math.floor((pxH - fitH) / 2), cardX: 0 } }
   }
-  return indentedUnlessShrunk(fit, indent)
+  const best = indentedUnlessShrunk(fit, indent)
+  return best.scale < (cell.h * MATH_EM_FLOOR) / 1000 - 1e-9 ? null : best.l
 }

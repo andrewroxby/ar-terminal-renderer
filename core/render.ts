@@ -113,6 +113,9 @@ export class Renderer {
   private draining = false
   private idleWaiters: (() => void)[] = []
   private unsent = new Map<number, Drawn>()
+  // Set by the first transmit in a pass that finds the lock held, so the
+  // rest of the pass queues at once instead of waiting out the lock each.
+  private lockMissed = false
   private retry: ReturnType<typeof setTimeout> | undefined
 
   constructor(o: Options) {
@@ -153,6 +156,7 @@ export class Renderer {
     if (blocks.length === 0) return markdown
 
     this.spent = 0
+    this.lockMissed = false
     const draw = this.available().ok
     // Draw in document order so the raster budget goes to the first figures.
     let figures = 0
@@ -199,6 +203,7 @@ export class Renderer {
     this.sent.clear()
     this.availMemo = null
     this.cellMemo = null
+    this.lockMissed = false
     const recent = this.figures.values().slice(-MAX_RESEND)
     for (const d of recent) this.send(d)
     return recent.length
@@ -314,12 +319,17 @@ export class Renderer {
 
     if (this.memo.has(key)) return this.fromMemo(key)
 
-    const finish = (src: Source): RasterOptions => {
-      const layout: Layout =
+    // Null when math would have to shrink below legibility, which leaves its text.
+    const finish = (src: Source): RasterOptions | null => {
+      const layout: Layout | null =
         src.style === 'math'
           ? layoutMath(src.vw, src.vh, width, cell, indent)
           : computeLayout(src.vw, src.vh, width, cell, src.maxScale, indent)
-      return { svg: src.svg, layout, bg: src.style === 'math' ? null : card, cacheDir: this.cacheDir }
+      return layout && { svg: src.svg, layout, bg: src.style === 'math' ? null : card, cacheDir: this.cacheDir }
+    }
+    const rasterAsync = async (src: Source): Promise<boolean> => {
+      const ro = finish(src)
+      return ro ? (await renderAsync(ro)) !== null : false
     }
 
     let src = skey ? this.sources.get(skey) : undefined
@@ -333,7 +343,7 @@ export class Renderer {
             made = await convert()
             if (made !== undefined) this.sources.set(skey!, made)
           }
-          return made ? (await renderAsync(finish(made))) !== null : false
+          return made ? rasterAsync(made) : false
         })
         return PENDING
       }
@@ -342,7 +352,7 @@ export class Renderer {
         this.enqueue(key, async () => {
           const made = make()
           if (skey) this.sources.set(skey, made)
-          return made ? (await renderAsync(finish(made))) !== null : false
+          return made ? rasterAsync(made) : false
         })
         return PENDING
       }
@@ -356,6 +366,10 @@ export class Renderer {
       return null
     }
     const ro = finish(src)
+    if (!ro) {
+      this.memo.set(key, null)
+      return null
+    }
 
     let hit = lookup(ro)
     if (hit.state === 'miss') {
@@ -453,12 +467,14 @@ export class Renderer {
     }
     // Chunks carry no id, so a whole image goes out under a cross-process
     // lock. When it is busy the image waits for a short timer.
-    const release = tryLock(this.cacheDir, this.o.lockWaitMs ?? 200)
+    const release = tryLock(this.cacheDir, this.lockMissed ? 0 : (this.o.lockWaitMs ?? 200))
     if (!release) {
+      this.lockMissed = true
       this.unsent.set(d.id, d)
       if (!this.retry) {
         this.retry = setTimeout(() => {
           this.retry = undefined
+          this.lockMissed = false
           const waiting = [...this.unsent.values()]
           this.unsent.clear()
           for (const w of waiting) this.send(w)

@@ -1,6 +1,7 @@
-// ar-term-render for Pi: draws figures in assistant messages through
-// registerMarkdownTransformer. adapter.ts holds the wiring; this entry point
-// only supplies Pi's cell-size fallback.
+// arπ-render, the Pi adapter for ar-term-render: draws SVG, PNG, Mermaid and
+// display math in assistant messages through registerMarkdownTransformer.
+// adapter.ts holds the wiring; this entry point only supplies Pi's cell-size
+// fallback.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { getCellDimensions } from '@earendil-works/pi-tui'
