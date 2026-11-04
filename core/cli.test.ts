@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { MATH_EM, layoutMath } from './layout.ts'
+import { mathToSvg } from './math.ts'
 
 const CLI = fileURLToPath(new URL('./cli.ts', import.meta.url))
 const hasRsvg = spawnSync('rsvg-convert', ['--version']).status === 0
@@ -48,6 +50,25 @@ test('--size and --scale set the pixel size, as termtex-img -s does at scale 2',
   assert.ok(w(['-s', '8', '-p', '4']) > w8)
 })
 
+test('--em-px sets one em in pixels, as Pi sets display math (0.8 of the cell height)', opts, () => {
+  const tex = '\\frac{a+b}{2}+x^2'
+  const svg = mathToSvg(tex, '#cdd6f4', true)!
+  const cell = { w: 24, h: 48 }
+  const want = layoutMath(svg.vw, svg.vh, 200, cell, 0)
+  const r = cli(['tex', '--display', '-p', '0', '--em-px', String(cell.h * MATH_EM), tex])
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual([png(r.stdout.trim()).w, png(r.stdout.trim()).h], [want.fitW, want.fitH])
+})
+
+test('--cell pads the PNG to whole cells with the formula at the left', opts, () => {
+  const tex = '\\frac{a+b}{2}+x^2'
+  const flush = png(cli(['tex', '--display', '-p', '0', '--em-px', '38.4', tex]).stdout.trim())
+  const r = cli(['tex', '--display', '-p', '0', '--em-px', '38.4', '--cell', '24x48', tex])
+  assert.equal(r.status, 0, r.stderr)
+  const p = png(r.stdout.trim())
+  assert.deepEqual([p.w, p.h], [Math.ceil(flush.w / 24) * 24, Math.ceil(flush.h / 48) * 48])
+})
+
 test('-o writes the file and prints that path; --background fills it', opts, () => {
   const out = join(tmp, 'o.png')
   const r = cli(['tex', '-o', out, '--background', '#102030', 'x^2'])
@@ -79,7 +100,7 @@ test('failures exit non-zero with a short stderr message and no stdout', opts, (
 })
 
 test('usage errors exit 2', () => {
-  for (const args of [[], ['wat'], ['tex'], ['tex', '--color', 'red', 'x'], ['tex', '--scale', '0', 'x'], ['tex', '--display', '--inline', 'x']]) {
+  for (const args of [[], ['wat'], ['tex'], ['tex', '--color', 'red', 'x'], ['tex', '--scale', '0', 'x'], ['tex', '--display', '--inline', 'x'], ['tex', '--size', '8', '--em-px', '30', 'x'], ['tex', '--em-px', '0', 'x'], ['tex', '--cell', '24', 'x']]) {
     const r = cli(args)
     assert.equal(r.status, 2, args.join(' '))
     assert.match(r.stderr, /usage:/)

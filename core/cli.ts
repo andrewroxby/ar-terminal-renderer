@@ -12,7 +12,7 @@ import type { CleanSvg } from './svg.ts'
 import { mathToSvg } from './math.ts'
 import { MERMAID_TIMEOUT_MS, MermaidRunner } from './mermaid.ts'
 import { sanitizeSvg } from './svg.ts'
-import type { Layout } from './layout.ts'
+import type { Cell, Layout } from './layout.ts'
 import { runDemo } from './demo.ts'
 import { defaultCacheDir, lookup, render } from './raster.ts'
 
@@ -24,7 +24,7 @@ if (import.meta.main) {
 }
 
 const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [--background #hex]
-                          [--size N] [--scale N] [--padding N] [-o FILE] [LATEX]
+                          [--size N | --em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
        ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   (SVG on stdin)
        ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     (diagram on stdin)
        ar-term-render demo [FILE]       (draw a Markdown file at the terminal's width)
@@ -32,7 +32,10 @@ const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [
 Writes a PNG and prints its path. LATEX is read from stdin when not given.
 tex: transparent background, default color #cdd6f4. --size is a font size in
 logical pixels (default 32, as termtex-img's -s) and --scale the device pixel
-ratio (default 2), so one em is size x scale x 1.83 pixels. svg and mermaid
+ratio (default 2), so one em is size x scale x 1.83 pixels. --em-px instead sets
+one em in device pixels directly (--size and --scale then no longer size it), and
+--cell WxH pads the image to whole cells of that pixel size, formula at the top
+left and centered vertically, as Pi lays out display math. svg and mermaid
 draw at --scale pixels per drawing unit. --padding is in logical pixels.
 demo prints FILE (default: a bundled sample) through the renderer, leaving the
 images on screen; AR_TERM_RENDER_INDENT=0-8 sets the figures' left indent in cells and
@@ -65,6 +68,13 @@ function hex(name: string, v: string | undefined, fallback: string | null): stri
   return v
 }
 
+function parseCell(v: string | undefined): Cell | undefined {
+  if (v === undefined) return undefined
+  const m = /^(\d+)x(\d+)$/.exec(v)
+  if (!m || Number(m[1]) < 1 || Number(m[2]) < 1) throw new Fail('--cell must be WxH in pixels, such as 24x48', 2)
+  return { w: Number(m[1]), h: Number(m[2]) }
+}
+
 function readStdin(): string {
   try {
     return readFileSync(0, 'utf8')
@@ -74,18 +84,24 @@ function readStdin(): string {
 }
 
 // Rasterizes at `unit` pixels per drawing unit, padded, and returns the path.
-function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out: string | undefined): string {
+// With `cell`, the canvas grows to whole cells and the figure sits at the left,
+// centered vertically.
+function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out: string | undefined, cell?: Cell): string {
   const fitW = Math.max(1, Math.round(svg.vw * unit))
   const fitH = Math.max(1, Math.round(svg.vh * unit))
+  const innerW = fitW + 2 * pad
+  const innerH = fitH + 2 * pad
+  const pxW = cell ? Math.ceil(innerW / cell.w) * cell.w : innerW
+  const pxH = cell ? Math.ceil(innerH / cell.h) * cell.h : innerH
   const layout: Layout = {
     cols: 0,
     rows: 0,
     fitW,
     fitH,
-    pxW: fitW + 2 * pad,
-    pxH: fitH + 2 * pad,
+    pxW,
+    pxH,
     left: pad,
-    top: pad,
+    top: pad + Math.floor((pxH - innerH) / 2),
     cardX: 0,
   }
   if (layout.pxW > MAX_SIDE || layout.pxH > MAX_SIDE || layout.pxW * layout.pxH > MAX_PIXELS) {
@@ -113,6 +129,8 @@ export async function main(argv: string[]): Promise<string> {
         background: { type: 'string' },
         card: { type: 'string' },
         size: { type: 'string', short: 's' },
+        'em-px': { type: 'string' },
+        cell: { type: 'string' },
         scale: { type: 'string' },
         padding: { type: 'string', short: 'p' },
         output: { type: 'string', short: 'o' },
@@ -137,12 +155,17 @@ export async function main(argv: string[]): Promise<string> {
     if (values.display && values.inline) throw new Fail('--display and --inline conflict', 2)
     const tex = (rest.length ? rest.join(' ') : readStdin()).trim()
     if (!tex) throw new Fail('no LaTeX given', 2)
+    if (values.size !== undefined && values['em-px'] !== undefined) throw new Fail('--size and --em-px conflict', 2)
+    const emPx = values['em-px'] === undefined ? null : num('--em-px', values['em-px'], 0)
+    if (emPx === 0) throw new Fail('--em-px must be positive', 2)
     const size = num('--size', values.size, 32)
+    const cell = parseCell(values.cell)
     const color = hex('--color', values.color, '#cdd6f4')!
     const bg = hex('--background', values.background, null)
     const clean = mathToSvg(tex, color, !values.inline)
     if (!clean) throw new Fail('could not typeset that LaTeX')
-    return toPng(clean, (size * scale * TERMTEX_EM) / 1000, pad, bg, values.output)
+    const unit = (emPx ?? size * scale * TERMTEX_EM) / 1000
+    return toPng(clean, unit, pad, bg, values.output, cell)
   }
   if (cmd === 'svg') {
     const clean = sanitizeSvg(readStdin())

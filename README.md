@@ -73,7 +73,7 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
 ## CLI
 
 ```
-ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--size N] [--scale N] [--padding N] [-o FILE] [LATEX]
+ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--size N | --em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
 ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   # SVG on stdin
 ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     # diagram on stdin
 ar-term-render demo [FILE]                                                   # draw Markdown at the terminal width
@@ -83,7 +83,10 @@ Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
 short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
 `#cdd6f4` by default, and `--size` / `--scale` match termtex-img's `-s` at
 device scale 2 (one em is size x scale x 1.83 pixels), so Neovim's termtex can
-call it in place of `termtex-img`. A cache miss takes about 120 ms (node 40,
+call it in place of `termtex-img`. `--em-px N` sets one em in device pixels
+directly (Pi's display math is `0.8 x` cell height), and `--cell WxH` pads the
+PNG to whole cells with the formula at the left and centered vertically, the
+way Pi lays out display math, so a terminal can show it without stretching. A cache miss takes about 120 ms (node 40,
 MathJax load and conversion 40, rsvg 10, TS and argument handling the rest).
 
 `demo` runs the real Renderer over FILE (default `core/demo.md`: an SVG, a wide
