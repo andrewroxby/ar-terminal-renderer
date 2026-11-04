@@ -30,6 +30,16 @@ describe("scan", function()
     assert.are.same(0, #displays)
   end)
 
+  it("leaves a $$ or \\[ block with a blank line inside alone, as Pi does", function()
+    assert.are.same(0, #scan(lines("$$\na\n\nb\n$$")))
+    assert.are.same(0, #scan(lines("\\[\na\n\nb\n\\]")))
+    assert.are.same(0, #scan(lines("$$\na\n  \nb\n$$")))
+    -- A block after the refused one still draws.
+    local displays = scan(lines("$$\na\n\nb\n\n$$\nc\n$$"))
+    assert.are.same(1, #displays)
+    assert.are.same("c", displays[1].body)
+  end)
+
   it("keeps scanning after malformed display openers", function()
     local displays, inlines = scan(lines("$$\nunclosed\nLater $x$ works"))
     assert.are.same(0, #displays)

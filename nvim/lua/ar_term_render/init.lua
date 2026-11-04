@@ -11,9 +11,9 @@
 -- wider than the window), ar_term_render.art draws Unicode text with cellmath,
 -- as Pi and Claude Code do.
 --
--- Architecture mirrors nvim/pack/mermaid-text: one process per expression,
--- rows cached by expression, placement identical for both renderers because
--- image rows are just strings of placeholder cells.
+-- One process per expression, rows cached by expression, and placement
+-- identical for both renderers because image rows are just strings of
+-- placeholder cells.
 
 local api = vim.api
 local art = require("ar_term_render.art")
@@ -23,7 +23,7 @@ local terminal = require("ar_term_render.terminal")
 
 local M = {}
 
-M.config = {
+local defaults = {
   -- Milliseconds of quiet after an edit or resize before the buffer is rescanned.
   debounce = 300,
   filetypes = { "markdown" },
@@ -31,6 +31,7 @@ M.config = {
   images = true,
   -- Display math sits display_indent columns in from the text start, as in
   -- Pi, and loses the indent when keeping it would shrink the formula.
+  -- AR_TERM_RENDER_MATH_INDENT (0-8) overrides it, as it does in Pi.
   -- display_align = "center" centers each block instead and ignores the indent.
   display_indent = 3,
   display_align = "left",
@@ -38,12 +39,31 @@ M.config = {
   -- that another program cleared.
   resend = true,
   -- Milliseconds between backstop re-uploads, for a clear that lands while
-  -- nothing in Neovim moves; 0 leaves only the event triggers.
+  -- nothing in Neovim moves; 0 leaves only the event triggers. The backstop
+  -- pauses while the terminal reports Neovim unfocused.
   resend_every = 3000,
+  -- Sizes are one em in cell heights: display math starts at display_em and
+  -- shrinks to fit but never below display_em_floor; inline math is drawn at
+  -- inline_em and must fit one row.
+  display_em = 0.8,
+  display_em_floor = 0.5,
+  inline_em = 0.7,
+  -- The renderer: ar-term-render on PATH, else core/cli.ts in this checkout
+  -- through `node`. cellmath draws the Unicode text.
+  ar_term_render = "ar-term-render",
+  node = "node",
+  cellmath = "cellmath",
+  -- Cell size in pixels when the tty reports none.
+  fallback_cell = { w = 9, h = 20 },
 }
 
+M.config = vim.deepcopy(defaults)
+
 local ns = api.nvim_create_namespace("ar_term_render")
+-- Global autocmds, replaced whenever setup() runs; the per-buffer ones live
+-- in buf_group and outlast a second setup().
 local group = api.nvim_create_augroup("ar_term_render", { clear = true })
+local buf_group = api.nvim_create_augroup("ar_term_render_buffers", { clear = true })
 
 -- Above render-markdown's default 4096, so a conceal contest over a math
 -- span resolves in favour of the render. This governs conceal only: stacking
@@ -51,9 +71,22 @@ local group = api.nvim_create_augroup("ar_term_render", { clear = true })
 -- priority (measured on nvim 0.12.4).
 local PRIORITY = 4200
 
--- Per-buffer state; render cache is global, keyed by mode+width+expression.
+-- Per-buffer state; render cache is global, keyed by what a render depends on.
 local state = {}
 local cache = {}
+
+-- Whether the last render used images, to notice a viewer that changed.
+local last_images = nil
+
+-- AR_TERM_RENDER_MATH_INDENT (an integer 0-8) wins over display_indent, as
+-- it does over Pi's default.
+local function display_indent()
+  local v = (vim.env.AR_TERM_RENDER_MATH_INDENT or ""):match("^%s*(%d+)%s*$")
+  if v and tonumber(v) <= 8 then
+    return tonumber(v)
+  end
+  return M.config.display_indent
+end
 
 -- ---- rendering ----
 
@@ -85,7 +118,8 @@ end
 --
 -- Images are tried first and cellmath art catches everything they cannot do:
 -- a terminal without graphics, a formula the renderer rejects, or an inline
--- span too tall for one row.
+-- span too tall for one row. An expression that both refuse is remembered as
+-- undrawable, unless a run failed outright, which may pass next time.
 --
 -- Display blocks are left-aligned display_indent columns in, so they render
 -- against the width left of the indent. The callback's third value is the
@@ -93,19 +127,22 @@ end
 -- otherwise shrink or overflow.
 local function render(expr, inline, width, cb)
   -- The key carries everything a render depends on: which renderer drew it,
-  -- the window width, and the cell size images are measured against.
+  -- the window width, the cell size images are measured against, and the
+  -- text colour they are drawn in.
   local use_images = M.config.images and terminal.graphics()
+  last_images = use_images
   local cell = terminal.cell()
-  local want = not inline and M.config.display_align ~= "center" and M.config.display_indent or 0
+  local want = not inline and M.config.display_align ~= "center" and display_indent() or 0
   want = math.max(0, math.min(want, (width or 0) - 1))
   local key = string.format(
-    "%s:%s:%s:%dx%d:%d:%s",
+    "%s:%s:%s:%dx%d:%d:%s:%s",
     use_images and "img" or "art",
     inline and "i" or "d",
     width or 0,
     cell.w,
     cell.h,
     want,
+    use_images and image.foreground() or "-",
     expr
   )
   if cache[key] ~= nil then
@@ -114,10 +151,12 @@ local function render(expr, inline, width, cb)
     return
   end
 
-  local function art_render()
-    art.render(expr, inline, function(rows)
+  local function art_render(image_transient)
+    art.render(expr, inline, function(rows, art_transient)
       if not rows then
-        -- A spawn failure is transient; do not cache it for the session.
+        if not (image_transient or art_transient) then
+          cache[key] = { indent = want }
+        end
         cb(nil, nil, want)
         return
       end
@@ -129,17 +168,17 @@ local function render(expr, inline, width, cb)
   end
 
   if use_images then
-    image.render(expr, not inline, width or 80, function(img)
+    image.render(expr, not inline, width or 80, function(img, transient)
       if img then
         cache[key] = { rows = img.lines, hl = img.hl, indent = img.indent }
         cb(img.lines, img.hl, img.indent)
       else
-        art_render()
+        art_render(transient)
       end
     end, want)
     return
   end
-  art_render()
+  art_render(false)
 end
 
 -- ---- marks ----
@@ -478,7 +517,7 @@ local function attach(buf)
     generation = 0,
   }
   local function on(events, cb)
-    api.nvim_create_autocmd(events, { group = group, buffer = buf, callback = cb })
+    api.nvim_create_autocmd(events, { group = buf_group, buffer = buf, callback = cb })
   end
   on({ "BufWinEnter", "BufWritePost", "InsertLeave" }, function()
     schedule_refresh(buf)
@@ -490,7 +529,7 @@ local function attach(buf)
     sync_cursor(buf)
   end)
   api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
-    group = group,
+    group = buf_group,
     buffer = buf,
     once = true,
     callback = function()
@@ -527,8 +566,20 @@ local function resend_visible()
       end
     end
   end
-  if any then
+  if any and M.config.images and terminal.graphics() then
     image.resend(wanted)
+  end
+end
+
+-- Drops everything remembered about renders and draws every buffer again,
+-- for a change the row cache cannot see, such as new highlight colours.
+local function refresh_all()
+  cache = {}
+  for buf, st in pairs(state) do
+    for _, block in ipairs(st.displays) do
+      block.source = nil
+    end
+    schedule_refresh(buf)
   end
 end
 
@@ -572,8 +623,48 @@ end
 
 -- ---- setup ----
 
+local resend_timer
+local backstop
+
+local function stop_timer(timer)
+  if timer then
+    timer:stop()
+    if not timer:is_closing() then
+      timer:close()
+    end
+  end
+end
+
+local function start_backstop()
+  stop_timer(backstop)
+  backstop = nil
+  if M.config.resend and M.config.resend_every > 0 then
+    backstop = vim.uv.new_timer()
+    backstop:start(M.config.resend_every, M.config.resend_every, vim.schedule_wrap(resend_visible))
+  end
+end
+
+--- Sets the plugin up. Options not given take their defaults, and calling it
+--- again replaces the earlier call. See `defaults` above.
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+  M.config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  api.nvim_clear_autocmds({ group = group })
+  stop_timer(resend_timer)
+  resend_timer = nil
+  stop_timer(backstop)
+  backstop = nil
+
+  terminal.setup({ cell = M.config.fallback_cell })
+  art.setup({ bin = M.config.cellmath })
+  image.setup({
+    ar_bin = M.config.ar_term_render,
+    node = M.config.node,
+    display_em = M.config.display_em,
+    display_em_floor = M.config.display_em_floor,
+    inline_em = M.config.inline_em,
+  })
+  cache = {}
+
   api.nvim_create_autocmd("FileType", {
     group = group,
     pattern = M.config.filetypes,
@@ -581,18 +672,34 @@ function M.setup(opts)
       attach(ev.buf)
     end,
   })
-  -- A width change re-breaks display math, and a resize can change the cell
-  -- pixel size, which decides how many cells an image covers.
-  api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+  -- A width change re-breaks display math.
+  api.nvim_create_autocmd("WinResized", {
     group = group,
     callback = function()
-      terminal.invalidate_cell()
       cache = {}
       for buf in pairs(state) do
         if api.nvim_buf_is_valid(buf) then
           schedule_refresh(buf)
         end
       end
+    end,
+  })
+  -- A resize can change the cell pixel size, which decides how many cells an
+  -- image covers.
+  api.nvim_create_autocmd("VimResized", {
+    group = group,
+    callback = function()
+      terminal.invalidate_cell()
+      refresh_all()
+    end,
+  })
+  -- `:colorscheme` clears every highlight group, the image ids with them, and
+  -- changes the text colour the images are drawn in.
+  api.nvim_create_autocmd("ColorScheme", {
+    group = group,
+    callback = function()
+      image.rehighlight()
+      refresh_all()
     end,
   })
 
@@ -603,22 +710,40 @@ function M.setup(opts)
   -- moves. A re-upload is idempotent and takes ~2 ms to prepare; the short
   -- wait folds a burst of scroll events into one.
   if M.config.resend then
-    local timer = vim.uv.new_timer()
+    resend_timer = vim.uv.new_timer()
     local function soon()
-      timer:stop()
-      timer:start(50, 0, vim.schedule_wrap(resend_visible))
+      resend_timer:stop()
+      resend_timer:start(50, 0, vim.schedule_wrap(resend_visible))
     end
     api.nvim_create_autocmd(
-      { "BufWinEnter", "FocusGained", "WinScrolled", "WinResized", "VimResized", "CursorHold" },
+      { "BufWinEnter", "WinScrolled", "WinResized", "VimResized", "CursorHold" },
       { group = group, callback = soon }
     )
     -- For callers that know a clear just happened, such as the yazi column
     -- coming back after yazi erased an image preview.
     api.nvim_create_autocmd("User", { group = group, pattern = "ArRenderResend", callback = soon })
-    if M.config.resend_every > 0 then
-      local backstop = vim.uv.new_timer()
-      backstop:start(M.config.resend_every, M.config.resend_every, vim.schedule_wrap(resend_visible))
-    end
+    -- The backstop sleeps while the terminal says Neovim is not in front (a
+    -- hidden tmux window, another app), so only the visible editor uploads.
+    api.nvim_create_autocmd("FocusLost", {
+      group = group,
+      callback = function()
+        stop_timer(backstop)
+        backstop = nil
+      end,
+    })
+    api.nvim_create_autocmd("FocusGained", {
+      group = group,
+      callback = function()
+        start_backstop()
+        soon()
+        -- A viewer that came or went changes whether images draw at all.
+        terminal.invalidate()
+        if last_images ~= nil and (M.config.images and terminal.graphics()) ~= last_images then
+          refresh_all()
+        end
+      end,
+    })
+    start_backstop()
   end
 
   -- Images live in the terminal, not the buffer, so they outlast nvim unless

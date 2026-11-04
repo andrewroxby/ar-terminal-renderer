@@ -20,11 +20,13 @@
 -- foreground colour of a per-image highlight group, which is how the kitty
 -- protocol expects to find it.
 --
--- PNGs are cached on disk by expression, size, and colour, so a formula costs
--- one subprocess the first time it is ever seen and nothing afterwards.
+-- The PNGs live in the renderer's own content-keyed cache
+-- ($TMPDIR/ar-term-render, shared with Pi and swept by age). This module keeps
+-- only the paths in memory, so a formula costs one renderer run per session.
 
 local api = vim.api
 local uv = vim.uv
+local lock = require("ar_term_render.lock")
 local queue = require("ar_term_render.queue")
 local terminal = require("ar_term_render.terminal")
 
@@ -33,11 +35,11 @@ local M = {}
 -- This file is <root>/nvim/lua/ar_term_render/image.lua.
 local ROOT = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)))))
 
-M.config = {
+local defaults = {
   -- ar-term-render is found on PATH, else run from this checkout through node.
   ar_bin = "ar-term-render",
   ar_fallback_script = ROOT .. "/core/cli.ts",
-  cache_dir = vim.fn.stdpath("cache") .. "/ar-term-render",
+  node = "node",
   -- Sizes are one em in cell heights. Display math starts at display_em, as
   -- in Pi (about the size of the terminal's own letters), and shrinks to fit
   -- but never below display_em_floor. Inline math is drawn once at inline_em
@@ -50,8 +52,26 @@ M.config = {
   max_passes = 4,
 }
 
+local config = vim.deepcopy(defaults)
+
+local warned = {}
+local node_checked = {}
+
+--- Replaces the options with the defaults plus `opts`, so calling it again
+--- starts from scratch. It also forgets which warnings were shown.
+--- @param opts table|nil keys of `defaults`
+function M.setup(opts)
+  config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  warned = {}
+  node_checked = {}
+end
+
 -- Em sizes move in steps of this many device pixels.
 local EM_STEP = 0.1
+
+-- Columns a display formula may take, as in core/layout.ts: the width less
+-- two and the indent, capped at 100.
+local MAX_COLS = 100
 
 local STACKED_ENVIRONMENTS = { "matrix", "pmatrix", "bmatrix", "cases", "aligned", "array" }
 
@@ -126,21 +146,25 @@ local function png_size(path)
   return be32(17), be32(21)
 end
 
--- ---- rendering ----
+-- ---- terminal images ----
 
-local sent = {}
--- Ids by content, so a formula drawn twice, or redrawn after a resize drops
--- the row cache, reuses one image in the terminal instead of orphaning the
--- old one. The path is already a hash of expression, size, and colour.
+-- Image data in the terminal, by id. `images[id]` says what the id shows,
+-- `ids` finds an id by what it shows, so a formula drawn twice, or drawn
+-- again after the row cache is dropped, reuses one image. `sent` holds the
+-- ids whose data has reached the terminal, and `pending` those waiting on the
+-- transmit lock.
+local images = {}
 local ids = {}
+local sent = {}
+local pending = {}
 
 -- Ids must fit 24 bits so they survive as a highlight foreground colour, and
 -- must avoid 0 (kitty treats it as unset).
 --
 -- Every program in one terminal window shares its image store, tmux panes
 -- included, so each Neovim starts its run of ids at its own point in the
--- 24-bit space. A shared fixed start let two Neovims overwrite each other's
--- images, and a formula then drew another process's picture.
+-- 24-bit space. Two Neovims sharing a start would overwrite each other's
+-- images.
 local next_id = math.floor(vim.uv.os_getpid() * 2654435761 + vim.uv.hrtime()) % 0xFFFFFF
 
 local function allocate_id()
@@ -148,83 +172,104 @@ local function allocate_id()
   return next_id
 end
 
-local warned_missing = false
-
---- The argv prefix that runs ar-term-render, or nil when it is missing, in
---- which case the caller draws cellmath art. Warns once.
-function M.command()
-  local path = vim.fn.exepath(M.config.ar_bin)
-  if path ~= "" then
-    return { path }
-  end
-  local node = vim.fn.exepath("node")
-  if node ~= "" and uv.fs_stat(M.config.ar_fallback_script) then
-    return { node, M.config.ar_fallback_script }
-  end
-  if not warned_missing then
-    warned_missing = true
-    vim.notify("ar-term-render: renderer not found; drawing math with cellmath", vim.log.levels.WARN)
-  end
-  return nil
-end
-
-local command_stamp = {}
-
--- Cache keys carry the renderer's identity, so a rebuilt CLI or MathJax
--- bundle stops serving PNGs the old one drew.
-local function stamp(cmd)
-  local id = table.concat(cmd, " ")
-  if not command_stamp[id] then
-    local real = uv.fs_realpath(cmd[#cmd]) or cmd[#cmd]
-    local parts = { id }
-    for _, file in ipairs({ real, vim.fs.dirname(real) .. "/vendor/mathjax.cjs" }) do
-      local st = uv.fs_stat(file)
-      parts[#parts + 1] = st and string.format("%d:%d", st.size, st.mtime.sec) or "?"
+-- Kitty APC frames for a PNG, 4096 base64 bytes each, wrapped for tmux. Every
+-- frame carries q=2 so the terminal never answers into the editor's input.
+function M.frames(id, data, cols, rows)
+  local encoded = vim.base64.encode(data)
+  local frames = {}
+  local offset = 1
+  repeat
+    local chunk = encoded:sub(offset, offset + 4095)
+    offset = offset + 4096
+    local more = offset <= #encoded and 1 or 0
+    local control
+    if #frames == 0 then
+      control = string.format("a=T,U=1,i=%d,p=%d,f=100,c=%d,r=%d,q=2,m=%d", id, id, cols, rows, more)
+    else
+      control = string.format("q=2,m=%d", more)
     end
-    command_stamp[id] = table.concat(parts, ":")
-  end
-  return command_stamp[id]
+    frames[#frames + 1] = terminal.wrap("\027_G" .. control .. ";" .. chunk .. "\027\\")
+  until offset > #encoded
+  return frames
 end
 
-local function foreground()
-  local normal = api.nvim_get_hl(0, { name = "Normal", link = false })
-  if normal and normal.fg then
-    return string.format("#%06x", normal.fg)
-  end
-  return "#c5c9c5"
-end
-
-local function cache_path(identity, expr, display, variant, color)
-  local key = table.concat({ identity, expr, display and "d" or "i", variant, color }, "\30")
-  local digest = vim.fn.sha256(key)
-  return M.config.cache_dir .. "/" .. digest .. ".png"
-end
-
--- Transmits a PNG as inline base64 so the bytes reach remote clients too, not
--- only readers of this machine's filesystem.
-local function transmit(id, path, cols, rows)
-  local file = io.open(path, "rb")
+-- Puts an image's bytes in the terminal as inline base64, so they reach
+-- remote clients too. The frames go out under the cross-process lock Pi
+-- takes (see ar_term_render.lock). Answers "ok", "busy" when another process
+-- holds the lock, or "gone" when the PNG is no longer there.
+local function upload(id)
+  local img = images[id]
+  local file = io.open(img.path, "rb")
   if not file then
-    return false
+    return "gone"
   end
   local data = file:read("*a")
   file:close()
-  local encoded = vim.base64.encode(data)
-  local chunk_size = 4096
-  local offset = 1
-  local first = true
-  while offset <= #encoded do
-    local chunk = encoded:sub(offset, offset + chunk_size - 1)
-    offset = offset + chunk_size
-    local more = offset <= #encoded and 1 or 0
-    local control
-    if first then
-      control = string.format("a=T,U=1,i=%d,p=%d,f=100,c=%d,r=%d,q=2,m=%d", id, id, cols, rows, more)
-      first = false
-    else
-      control = string.format("m=%d", more)
-    end
-    terminal.write("\027_G" .. control .. ";" .. chunk .. "\027\\")
+  if #data == 0 then
+    return "gone"
+  end
+  local release = lock.try()
+  if not release then
+    return "busy"
+  end
+  pcall(function()
+    terminal.send(table.concat(M.frames(id, data, img.cols, img.rows)))
+  end)
+  release()
+  sent[id] = true
+  pending[id] = nil
+  return "ok"
+end
+
+local function forget(id)
+  local img = images[id]
+  if img then
+    ids[img.slot] = nil
+  end
+  images[id] = nil
+  sent[id] = nil
+  pending[id] = nil
+end
+
+local retry
+
+-- Tries the images that found the lock busy again after a short random wait,
+-- so several editors that met at the same moment do not meet again. A busy
+-- lock ends the round, leaving the rest for the next.
+local function schedule_retry()
+  if retry then
+    return
+  end
+  retry = uv.new_timer()
+  retry:start(
+    100 + (uv.hrtime() % 150000000) / 1e6,
+    0,
+    vim.schedule_wrap(function()
+      retry:close()
+      retry = nil
+      for id in pairs(pending) do
+        local result = upload(id)
+        if result == "gone" then
+          forget(id)
+        elseif result == "busy" then
+          schedule_retry()
+          return
+        end
+      end
+    end)
+  )
+end
+
+-- Starts an upload, queueing it behind the lock when that is busy. Answers
+-- false when the PNG is gone.
+local function start_upload(id)
+  local result = upload(id)
+  if result == "busy" then
+    pending[id] = true
+    schedule_retry()
+  elseif result == "gone" then
+    forget(id)
+    return false
   end
   return true
 end
@@ -247,19 +292,27 @@ local function highlight_for(id)
   return name
 end
 
+--- Sets every image's highlight group again. `:colorscheme` clears them,
+--- and with them the ids the terminal reads from the placeholder cells.
+function M.rehighlight()
+  for id in pairs(images) do
+    highlight_for(id)
+  end
+end
+
 local function build(path, display, cols, rows)
   if cols > #DIACRITICS or rows > #DIACRITICS then
     return nil
   end
   local slot = string.format("%s:%dx%d", path, cols, rows)
   local id = ids[slot]
-  if not id or not sent[id] then
-    id = id or allocate_id()
-    if not transmit(id, path, cols, rows) then
-      return nil
-    end
+  if not id then
+    id = allocate_id()
     ids[slot] = id
-    sent[id] = true
+    images[id] = { path = path, cols = cols, rows = rows, slot = slot }
+  end
+  if not sent[id] and not pending[id] and not start_upload(id) then
+    return nil
   end
   local lines = {}
   for r = 1, rows do
@@ -275,50 +328,154 @@ local function build(path, display, cols, rows)
   }
 end
 
-local tmp_counter = 0
+-- ---- renderer ----
 
--- Rasterizes to a temporary file and renames it into place, so a reader only
--- ever sees a whole PNG. `em` is one em in device pixels. The canvas is whole
--- cells, so the terminal places the image without stretching it and the em
--- stays true.
-local function rasterize(bin, expr, display, em, color, path, cb)
-  queue.submit(path, function(done)
-    vim.fn.mkdir(M.config.cache_dir, "p")
-    tmp_counter = tmp_counter + 1
-    local tmp = string.format("%s.%d.%d.tmp", path, uv.os_getpid(), tmp_counter)
-    local cell = terminal.cell()
+-- Node releases that run core/cli.ts: type stripping without a flag and
+-- import.meta.main arrived in 22.18 and 24.2.
+local NODE_NEEDS = "Node 22.18+ or 24.2+"
+
+local function node_supported(major, minor)
+  return (major == 22 and minor >= 18) or (major == 24 and minor >= 2) or major >= 25
+end
+
+local function warn_once(key, message)
+  if not warned[key] then
+    warned[key] = true
+    vim.notify("ar-term-render: " .. message .. "; drawing math with cellmath", vim.log.levels.WARN)
+  end
+end
+
+-- Checks the node that will run the renderer, once per binary.
+local function node_ok(node)
+  if node_checked[node] == nil then
+    local ok, res = pcall(function()
+      return vim.system({ node, "--version" }, { text = true }):wait(2000)
+    end)
+    local major, minor = ((ok and res.code == 0 and res.stdout) or ""):match("v(%d+)%.(%d+)")
+    if not major then
+      warn_once("node", "node did not answer --version; the renderer needs " .. NODE_NEEDS)
+      node_checked[node] = false
+    elseif not node_supported(tonumber(major), tonumber(minor)) then
+      warn_once("node", string.format("the renderer needs %s, found %s", NODE_NEEDS, vim.trim(res.stdout)))
+      node_checked[node] = false
+    else
+      node_checked[node] = true
+    end
+  end
+  return node_checked[node]
+end
+
+--- The argv prefix that runs ar-term-render, or nil when it is missing or
+--- node is too old for it, in which case the caller draws cellmath art.
+--- Warns once either way.
+function M.command()
+  local argv
+  local path = vim.fn.exepath(config.ar_bin)
+  if path ~= "" then
+    argv = { path }
+  else
+    local node = vim.fn.exepath(config.node)
+    if node ~= "" and uv.fs_stat(config.ar_fallback_script) then
+      argv = { node, config.ar_fallback_script }
+    end
+  end
+  if not argv then
+    warn_once("missing", "renderer not found")
+    return nil
+  end
+  if not node_ok(config.node) then
+    return nil
+  end
+  return argv
+end
+
+-- The text colour as #rrggbb, or nil when Normal has none, in which case the
+-- renderer draws its own default.
+function M.foreground()
+  local normal = api.nvim_get_hl(0, { name = "Normal", link = false })
+  if normal and normal.fg then
+    return string.format("#%06x", normal.fg)
+  end
+  return nil
+end
+
+-- PNG paths from the renderer, by what was asked of it. `false` marks a
+-- formula it rejected, so it is not asked again. A failed run is not
+-- remembered.
+local paths = {}
+
+-- The renderer prints "ar-term-render: ..." and exits 1 for input it
+-- refuses. Any other end, such as a node that cannot run it, is a failed run.
+local function rejected(res)
+  local err = res.stderr or ""
+  return res.code == 1 and (res.signal or 0) == 0 and (err:find("^ar%-term%-render:") ~= nil or err:find("\nar%-term%-render:", 1, true) ~= nil)
+end
+
+-- Gets the PNG for one expression at `em` device pixels per em, asking the
+-- renderer unless this session already has it, then answers through
+-- cb(path) or, when there is none, cb(nil, transient). The canvas is whole
+-- cells of `cell`, so the terminal places the image without stretching it and
+-- the em stays true. transient says the run failed rather than the formula.
+local function png(bin, expr, display, em, color, cell, cb)
+  local key = table.concat({
+    table.concat(bin, " "),
+    lock.dir(),
+    display and "d" or "i",
+    string.format("%.1f", em),
+    cell.w .. "x" .. cell.h,
+    color or "-",
+    expr,
+  }, "\30")
+  local known = paths[key]
+  if known == false then
+    cb(nil)
+    return
+  end
+  if known and uv.fs_stat(known) then
+    cb(known)
+    return
+  end
+  queue.submit("png:" .. key, function(done)
     local cmd = vim.list_extend(vim.deepcopy(bin), {
       "tex",
       display and "--display" or "--inline",
-      "-o", tmp,
-      "-c", color,
       "--em-px", string.format("%.1f", em),
       "--cell", cell.w .. "x" .. cell.h,
-      "--",
-      expr,
     })
-    vim.system(cmd, { text = true }, function(res)
+    if color then
+      vim.list_extend(cmd, { "-c", color })
+    end
+    vim.list_extend(cmd, { "--", expr })
+    local started = pcall(vim.system, cmd, { text = true }, function(res)
       vim.schedule(function()
-        if res.code ~= 0 or not uv.fs_stat(tmp) then
-          os.remove(tmp)
-          done(false)
-          return
+        local out = vim.trim(res.stdout or "")
+        if res.code == 0 and (res.signal or 0) == 0 and out ~= "" and uv.fs_stat(out) then
+          paths[key] = out
+          done(out)
+        elseif rejected(res) then
+          paths[key] = false
+          done(nil)
+        else
+          local line = vim.trim((res.stderr or ""):match("[^\n]*") or "")
+          warn_once("failed", string.format("the renderer failed (%s); it needs %s and rsvg-convert", line ~= "" and line or "exit " .. tostring(res.code), NODE_NEEDS))
+          done(nil, true)
         end
-        if not os.rename(tmp, path) then
-          os.remove(tmp)
-        end
-        done(uv.fs_stat(path) ~= nil)
       end)
     end)
+    if not started then
+      done(nil, true)
+    end
   end, cb)
 end
 
---- Render one expression to placeholder rows, answering through cb(img|nil).
+--- Render one expression to placeholder rows, answering through
+--- cb(img|nil, transient).
 ---
---- The result always fits `max_cols` columns, and inline math always fits a
+--- The result always fits the column budget, and inline math always fits a
 --- single row. Since canvas size scales with the em, each miss yields the
 --- ratio to correct by. nil means no legible size fits, and the caller draws
---- cellmath art instead.
+--- cellmath art instead. transient is true when nil came from a failed run,
+--- which the caller should not remember.
 ---
 --- Display math can ask for `indent` columns of left margin. The margin is
 --- kept only when it costs the formula no size; otherwise the formula is drawn
@@ -326,42 +483,57 @@ end
 --- the rows that many columns in.
 --- @param expr string LaTeX source, without delimiters
 --- @param display boolean display style when true, inline style when false
---- @param max_cols number column budget, normally the text width
---- @param cb fun(img: table|nil)
+--- @param width number window text width in columns
+--- @param cb fun(img: table|nil, transient: boolean|nil)
 --- @param indent number|nil left margin in columns, display math only
-function M.render(expr, display, max_cols, cb, indent)
+function M.render(expr, display, width, cb, indent)
   local bin = M.command()
-  if not bin or (not display and requires_flat_inline(expr)) then
+  if not bin then
+    cb(nil, true)
+    return
+  end
+  if not display and requires_flat_inline(expr) then
     cb(nil)
     return
   end
   local cell = terminal.cell()
-  local color = foreground()
+  local color = M.foreground()
 
   local function quantize(em)
     return tonumber(string.format("%.1f", math.floor(em / EM_STEP + 1e-6) * EM_STEP))
   end
-  local start_em = quantize(cell.h * (display and M.config.display_em or M.config.inline_em))
+  local start_em = quantize(cell.h * (display and config.display_em or config.inline_em))
   -- Inline math does not shrink: its floor is its start.
-  local floor_em = display and quantize(cell.h * M.config.display_em_floor) or start_em
+  local floor_em = display and quantize(cell.h * config.display_em_floor) or start_em
 
-  -- Shrinks the em until the image fits `budget` columns, then answers
-  -- done(img|nil, em). The image is the one drawn at that em.
-  local function fit(budget, done)
+  -- Columns available beside `margin` blank ones. Display math leaves two
+  -- columns free and stops at 100, as Pi does.
+  local function budget(margin)
+    if display then
+      return math.max(1, math.min(math.floor(width) - 2 - margin, MAX_COLS))
+    end
+    return math.max(1, math.floor(width))
+  end
+
+  -- Shrinks the em until the image fits `cols` columns, then answers
+  -- done(img|nil, em, transient). The image is the one drawn at that em.
+  local function fit(cols_budget, done)
     local function attempt(em, passes_left)
-      local key = string.format("em%.1f@%dx%d", em, cell.w, cell.h)
-      local path = cache_path(stamp(bin), expr, display, key, color)
-
-      local function measure()
-        local width, height = png_size(path)
-        if not width then
-          done(nil)
+      png(bin, expr, display, em, color, cell, function(path, transient)
+        if not path then
+          done(nil, nil, transient)
           return
         end
-        local cols = math.max(1, math.ceil(width / cell.w))
-        local rows = math.max(1, math.ceil(height / cell.h))
-        if cols <= budget and (display or rows == 1) then
-          done(build(path, display, cols, rows), em)
+        local px_w, px_h = png_size(path)
+        if not px_w then
+          done(nil, nil, true)
+          return
+        end
+        local cols = math.max(1, math.ceil(px_w / cell.w))
+        local rows = math.max(1, math.ceil(px_h / cell.h))
+        if cols <= cols_budget and (display or rows == 1) then
+          local img = build(path, display, cols, rows)
+          done(img, em, img == nil)
           return
         end
         if passes_left <= 0 or em <= floor_em then
@@ -372,7 +544,7 @@ function M.render(expr, display, max_cols, cb, indent)
         -- put it over a cell boundary. The floor is a size to try, not a size
         -- to stop before, so clamp to it and only give up once the floor
         -- itself has been measured and still does not fit.
-        local ratio = math.min((budget * cell.w) / width, 0.95)
+        local ratio = math.min((cols_budget * cell.w) / px_w, 0.95)
         local proposed = quantize(em * ratio)
         if proposed >= em then
           proposed = quantize(em - EM_STEP)
@@ -383,50 +555,37 @@ function M.render(expr, display, max_cols, cb, indent)
           return
         end
         attempt(next_em, passes_left - 1)
-      end
-
-      if uv.fs_stat(path) then
-        measure()
-      else
-        rasterize(bin, expr, display, em, color, path, function(ok)
-          if ok then
-            measure()
-          else
-            done(nil)
-          end
-        end)
-      end
+      end)
     end
 
-    attempt(start_em, M.config.max_passes)
+    attempt(start_em, config.max_passes)
   end
 
-  local flush = math.max(1, math.floor(max_cols or 80))
-  indent = display and math.min(indent or 0, flush - 1) or 0
+  indent = display and math.max(0, indent or 0) or 0
   if indent <= 0 then
-    fit(flush, function(img)
+    fit(budget(0), function(img, _, transient)
       if img then
         img.indent = 0
       end
-      cb(img)
+      cb(img, transient)
     end)
     return
   end
-  fit(flush - indent, function(indented, em)
+  fit(budget(indent), function(indented, em, indented_transient)
     if indented and em >= start_em then
       indented.indent = indent
       cb(indented)
       return
     end
-    fit(flush, function(unindented, flush_em)
-      if unindented and (not indented or flush_em > em) then
-        unindented.indent = 0
-        cb(unindented)
+    fit(budget(0), function(flush, flush_em, flush_transient)
+      if flush and (not indented or flush_em > em) then
+        flush.indent = 0
+        cb(flush)
       elseif indented then
         indented.indent = indent
         cb(indented)
       else
-        cb(nil)
+        cb(nil, indented_transient or flush_transient)
       end
     end)
   end)
@@ -438,31 +597,32 @@ end
 --- survived is not safe through tmux, whose passthrough cannot route the
 --- reply, so the caller resends what is on screen.
 function M.resend(wanted)
-  for slot, id in pairs(ids) do
-    if wanted[id] and sent[id] then
-      local path, cols, rows = slot:match("^(.*):(%d+)x(%d+)$")
-      transmit(id, path, tonumber(cols), tonumber(rows))
+  for id in pairs(wanted) do
+    if images[id] then
+      start_upload(id)
     end
   end
 end
 
---- Drop an image from the terminal's memory.
+--- Drop an image from the terminal's memory, data included.
 function M.delete(id)
-  if not sent[id] then
+  if not images[id] then
     return
   end
-  sent[id] = nil
-  for slot, known in pairs(ids) do
-    if known == id then
-      ids[slot] = nil
-    end
+  local was_sent = sent[id]
+  forget(id)
+  if was_sent then
+    terminal.write(string.format("\027_Ga=d,d=I,i=%d,q=2\027\\", id))
   end
-  terminal.write(string.format("\027_Ga=d,d=i,i=%d,q=2\027\\", id))
 end
 
 --- Drop every image this session transmitted.
 function M.delete_all()
-  for id in pairs(sent) do
+  local all = {}
+  for id in pairs(images) do
+    all[#all + 1] = id
+  end
+  for _, id in ipairs(all) do
     M.delete(id)
   end
 end

@@ -1,8 +1,8 @@
 -- Minimal init for headless plenary test runs.
 -- Puts this plugin and plenary.nvim on the runtimepath, nothing else.
 
--- Spec files run as parallel headless nvim jobs. Nothing headless ever wants a
--- swapfile, and later phases will open real buffers, so turn them off now.
+-- Spec files run as parallel headless nvim jobs. Nothing headless wants a
+-- swapfile, and the render specs open real buffers, so turn them off.
 vim.o.swapfile = false
 
 -- No ShaDa either, and this one matters beyond tidiness. Neovim saves session
@@ -45,9 +45,5 @@ end
 if not found then
   error("plenary.nvim not found on this machine; add its path in tests/minimal_init.lua")
 end
-
--- render-markdown, for the integration spec only. Its absence is not fatal:
--- that spec skips itself rather than failing the suite.
-add_to_rtp(data .. "/lazy/render-markdown.nvim")
 
 vim.cmd("runtime plugin/plenary.vim")

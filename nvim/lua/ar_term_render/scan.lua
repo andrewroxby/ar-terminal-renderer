@@ -110,6 +110,22 @@ local function scan_inline(line)
   return spans
 end
 
+-- Finds the line closing a $$ or \[ block that opened on the line before
+-- `from`: the first line matching `closer`, or nil when a blank line or the
+-- end of the buffer comes first. Pi leaves a block with a blank line inside
+-- as text, and so does this.
+local function block_end(lines, from, closer)
+  for j = from, #lines do
+    if lines[j]:match(closer) then
+      return j
+    end
+    if lines[j]:match("^%s*$") then
+      return nil
+    end
+  end
+  return nil
+end
+
 -- Scans buffer lines for math. Returns:
 --   displays: { open, close, body (joined lines) } — 0-based rows, close
 --     inclusive, covering the $$ or \[ \] fence lines themselves so the block
@@ -160,11 +176,8 @@ function M.scan(lines)
         displays[#displays + 1] = { open = i - 1, close = i - 1, body = rest:sub(1, same_line_close - 1) }
         i = i + 1
       else
-        local j = i + 1
-        while j <= n and not lines[j]:match("^%s*%$%$%s*$") do
-          j = j + 1
-        end
-        if j > n then
+        local j = block_end(lines, i + 1, "^%s*%$%$%s*$")
+        if not j then
           i = i + 1
         else
           local body = {}
@@ -176,11 +189,8 @@ function M.scan(lines)
         end
       end
     elseif line:match("^%s*\\%[%s*$") then
-      local j = i + 1
-      while j <= n and not lines[j]:match("^%s*\\%]%s*$") do
-        j = j + 1
-      end
-      if j > n then
+      local j = block_end(lines, i + 1, "^%s*\\%]%s*$")
+      if not j then
         i = i + 1
       else
         local body = {}

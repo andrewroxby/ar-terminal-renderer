@@ -3,13 +3,25 @@
 -- writer that is safe under tmux.
 
 local api = vim.api
+local uv = vim.uv
 
 local M = {}
 
-M.config = {
+local defaults = {
   -- Cell size when the ioctl probe fails; Ghostty at RobotoMono 15.
   cell = { w = 9, h = 20 },
 }
+
+local config = vim.deepcopy(defaults)
+
+--- Replaces the options with the defaults plus `opts`, so calling it again
+--- starts from scratch.
+--- @param opts table|nil { cell = { w, h } }
+function M.setup(opts)
+  config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+  M.invalidate_cell()
+  M.invalidate()
+end
 
 local cell_cache = nil
 
@@ -45,7 +57,7 @@ end
 
 function M.cell()
   if not cell_cache then
-    cell_cache = probe_cell() or M.config.cell
+    cell_cache = probe_cell() or config.cell
   end
   return cell_cache
 end
@@ -54,50 +66,130 @@ function M.invalidate_cell()
   cell_cache = nil
 end
 
-local tmux_term = nil
+-- ---- graphics ----
 
--- The outer client's terminal name; inside tmux $TERM only says tmux-256color.
-function M.tmux_client_term()
-  if tmux_term == nil then
-    local out = vim.fn.system({ "tmux", "display-message", "-p", "#{client_termname}" })
-    tmux_term = vim.v.shell_error == 0 and vim.trim(out):lower() or ""
+local KITTY_TERMS = { "ghostty", "kitty", "wezterm" }
+
+local function mentions_kitty_term(s)
+  s = s:lower()
+  for _, t in ipairs(KITTY_TERMS) do
+    if s:find(t, 1, true) then
+      return true
+    end
   end
-  return tmux_term
+  return false
 end
 
---- Whether to draw images. $AR_TERM_RENDER_IMAGES=0 turns them off.
+-- Runs a command and answers its trimmed stdout, or nil when it fails.
+local function default_run(cmd, args)
+  local ok, res = pcall(function()
+    return vim.system(vim.list_extend({ cmd }, args), { text = true }):wait(1500)
+  end)
+  if ok and res.code == 0 and res.stdout then
+    return vim.trim(res.stdout)
+  end
+  return nil
+end
+
+--- Whether a terminal draws kitty graphics, by the same rules as
+--- core/env.ts (the shared vectors in core/test/detect-vectors.json hold
+--- both to them):
+---   AR_TERM_RENDER_IMAGES=0|1 decides outright. Under tmux, the @viewer
+---   line decides when it names transport=none or a graphics value, else the
+---   attached client's terminal does. Outside tmux, the kitty and Ghostty
+---   environment does.
+--- herdr draws kitty images itself and strips TMUX, so TERM_PROGRAM=herdr
+--- counts here (and only here).
+--- @param env table environment variables by name
+--- @param run fun(cmd: string, args: string[]): string|nil
+--- @return table { ok: boolean, reason: string }
+function M.detect(env, run)
+  local override = env.AR_TERM_RENDER_IMAGES
+  if override == "0" then
+    return { ok = false, reason = "AR_TERM_RENDER_IMAGES=0" }
+  elseif override == "1" then
+    return { ok = true, reason = "AR_TERM_RENDER_IMAGES=1" }
+  end
+
+  if env.TMUX and env.TMUX ~= "" then
+    local viewer = run("tmux", { "show", "-gv", "@viewer" })
+    if viewer and viewer ~= "" then
+      local kv = {}
+      for part in viewer:gmatch("%S+") do
+        local k, v = part:match("^([^=]*)=(.*)$")
+        kv[k or part] = v or ""
+      end
+      if kv.transport == "none" then
+        return { ok = false, reason = "no viewer attached" }
+      elseif kv.graphics == "file" or kv.graphics == "inline" then
+        return { ok = true, reason = "viewer graphics=" .. kv.graphics }
+      elseif kv.graphics == "no" then
+        return { ok = false, reason = "viewer graphics=no" }
+      end
+    end
+    local term = (run("tmux", { "display", "-p", "#{client_termname}" }) or ""):lower()
+    return { ok = mentions_kitty_term(term), reason = "tmux client " .. (term ~= "" and term or "unknown") }
+  end
+
+  local ok = env.KITTY_WINDOW_ID ~= nil
+    or env.GHOSTTY_RESOURCES_DIR ~= nil
+    or mentions_kitty_term((env.TERM or "") .. " " .. (env.TERM_PROGRAM or ""))
+    or (env.TERM_PROGRAM or ""):lower() == "herdr"
+  return { ok = ok, reason = ok and "kitty-graphics terminal" or "terminal not recognized" }
+end
+
+-- The answer is remembered for this long, so a viewer that changes is picked
+-- up within seconds, as in Pi.
+local MEMO_MS = 2000
+local memo = nil
+
+local function now_ms()
+  return uv.hrtime() / 1e6
+end
+
+function M.invalidate()
+  memo = nil
+end
+
+--- Whether to draw images now. Placeholder cells carry the image id in a
+--- 24-bit foreground colour, which a terminal only gets with termguicolors.
 function M.graphics()
-  if vim.env.AR_TERM_RENDER_IMAGES == "0" then
+  if not vim.o.termguicolors then
     return false
   end
-  local term = (vim.env.TERM or ""):lower()
-  local program = (vim.env.TERM_PROGRAM or ""):lower()
-  return vim.env.KITTY_WINDOW_ID ~= nil
-    or vim.env.GHOSTTY_RESOURCES_DIR ~= nil
-    or program == "kitty"
-    or program == "ghostty"
-    -- herdr draws kitty images itself and strips TMUX, so no passthrough.
-    or program == "herdr"
-    or term:find("kitty", 1, true) ~= nil
-    or term:find("ghostty", 1, true) ~= nil
-    or (vim.env.TMUX ~= nil and M.tmux_client_term():find("ghostty", 1, true) ~= nil)
-    or (vim.env.TMUX ~= nil and M.tmux_client_term():find("kitty", 1, true) ~= nil)
+  local t = now_ms()
+  if not memo or t - memo.at > MEMO_MS then
+    memo = { at = t, v = M.detect(vim.env, default_run).ok }
+  end
+  return memo.v
 end
 
---- Writes raw bytes to the terminal, wrapped for tmux passthrough when
---- needed. Headless runs have no UI to draw on, so the bytes are dropped.
-function M.write(data)
+-- ---- writing ----
+
+--- Wraps an escape sequence for tmux passthrough when running under tmux.
+function M.wrap(data)
+  if vim.env.TMUX then
+    return "\027Ptmux;" .. data:gsub("\027", "\027\027") .. "\027\\"
+  end
+  return data
+end
+
+--- Sends bytes to the terminal as they are, in one write. Headless runs have
+--- no UI to draw on, so the bytes are dropped.
+function M.send(data)
   if #api.nvim_list_uis() == 0 then
     return
-  end
-  if vim.env.TMUX then
-    data = "\027Ptmux;" .. data:gsub("\027", "\027\027") .. "\027\\"
   end
   if api.nvim_ui_send then
     pcall(api.nvim_ui_send, data)
   else
     io.stdout:write(data)
   end
+end
+
+--- Wraps for tmux when needed, then sends.
+function M.write(data)
+  M.send(M.wrap(data))
 end
 
 return M

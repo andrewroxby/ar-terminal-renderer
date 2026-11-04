@@ -1,4 +1,4 @@
--- termtex.queue: bounded fan-out for renderer subprocesses.
+-- ar_term_render.queue: bounded fan-out for renderer subprocesses.
 --
 -- A buffer full of math asks for every formula at once. One process per
 -- formula exhausts the file-descriptor table ("too many open files") long

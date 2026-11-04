@@ -29,10 +29,10 @@ Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
   (`\ePtmux;`, doubled ESC) when `$TMUX` is set. A local viewer
   (`graphics=file`) gets one `t=f` escape carrying the cached PNG's path;
   others get 4096-byte chunks sent under a cross-process lock in the cache
-  directory (continuation chunks carry no id). `AR_TERM_RENDER_TRANSPORT`
-  forces `inline` or `file`. The Markdown gets
-  Unicode placeholder rows whose foreground color is the image id. No
-  terminal queries are ever sent.
+  directory (continuation chunks carry no id; the Neovim adapter takes the
+  same lock). `AR_TERM_RENDER_TRANSPORT` forces `inline` or `file`. The
+  Markdown gets Unicode placeholder rows whose foreground color is the image
+  id. No terminal queries are ever sent.
 - Availability: `tmux show -gv @viewer` (`graphics=file|inline` draws), else
   the tmux client terminal, else Ghostty/kitty outside tmux.
   `AR_TERM_RENDER_IMAGES=0|1` overrides. Fallback text is `[figure: title]` or
@@ -81,8 +81,10 @@ ar-term-render demo [FILE]                                                   # d
 ```
 
 Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
-short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
-`#d4d4d4` by default. `--em-px N` sets one em in device pixels (default 64;
+short stderr message on failure, 2 on bad usage. It runs on Node 22.18+ or
+24.2+ (type stripping and `import.meta.main`) and exits 1 naming that
+requirement on anything older. Each run sweeps cache files older than 7 days
+once a day. `tex` is transparent, colour `#d4d4d4` by default. `--em-px N` sets one em in device pixels (default 64;
 Pi's display math is `0.8 x` cell height), and `--cell WxH` pads the PNG to
 whole cells with the formula at the left and centered vertically, the way Pi
 lays out display math, so a terminal can show it without stretching.
@@ -133,19 +135,26 @@ On a terminal that speaks kitty graphics (kitty, Ghostty, herdr, or tmux
 under either), math is typeset as an image by the `tex` command above, sized
 from the terminal's cell pixels like Pi: display math at 0.8 em per cell
 height, left-aligned `display_indent` columns in, shrinking to fit the window
-and dropping the indent first. Inline math is drawn at 0.7 em and must fit one
-row. Images are transmitted inline, so they reach remote clients, and are
-re-sent when the view changes or another program clears them. Everywhere else,
+(width less two, at most 100 columns, as in Pi) and dropping the indent first.
+Display math is never shrunk below 0.5 em per cell height, as in Pi; past that
+the text stays. Inline math is drawn at 0.7 em and must fit one row. Images
+are transmitted inline, so they reach remote clients, and are re-sent when the
+view changes or another program clears them. Everywhere else,
 and for math an image cannot carry (inline math needing more than one row,
 fractions and matrices inline, TeX the renderer rejects), the plugin draws
 Unicode text with the `cellmath` CLI, as Pi and Claude Code do. cellmath does
 not wrap, so display art wider than the window stays as source. If the
 renderer is missing, everything draws as cellmath text.
 
-Requirements: Neovim (tested on 0.12), `node` and `rsvg-convert` for images, `cellmath`
-on `PATH` for text. The renderer is `ar-term-render` on `PATH`, else
-`core/cli.ts` in this checkout. PNGs are cached under
-`stdpath("cache")/ar-term-render`.
+Requirements: Neovim (tested on 0.12), Node 22.18+ or 24.2+ and `rsvg-convert`
+for images, `cellmath` on `PATH` for text. The renderer is `ar-term-render` on
+`PATH`, else `core/cli.ts` in this checkout; on an older Node the plugin warns
+once and draws cellmath text. The PNGs stay in the renderer's own cache,
+`$TMPDIR/ar-term-render`, which Pi shares; the plugin remembers their paths for
+the session. Whether images draw follows Pi: `AR_TERM_RENDER_IMAGES=0|1`, then
+tmux's `@viewer` line (re-read every 2 s), then the client terminal, and it
+needs `termguicolors`, because the image id travels in a foreground colour.
+`:colorscheme` redraws the math, since it clears those colours.
 
 Options for `setup()` (defaults shown):
 
@@ -154,17 +163,25 @@ Options for `setup()` (defaults shown):
   filetypes = { "markdown" },
   images = true,         -- false forces cellmath text
   debounce = 300,        -- ms of quiet before a buffer is rescanned
-  display_indent = 3,    -- columns in from the text start
+  display_indent = 3,    -- columns in from the text start (AR_TERM_RENDER_MATH_INDENT, 0-8, wins)
   display_align = "left", -- "center" ignores display_indent
   resend = true,         -- re-upload images that were cleared
-  resend_every = 3000,   -- ms between backstop re-uploads; 0 for none
+  resend_every = 3000,   -- ms between backstop re-uploads (paused while unfocused); 0 for none
+  display_em = 0.8,      -- em size in cell heights: display start, display floor, inline
+  display_em_floor = 0.5,
+  inline_em = 0.7,
+  ar_term_render = "ar-term-render", -- renderer command, else this checkout's core/cli.ts
+  node = "node",
+  cellmath = "cellmath",
+  fallback_cell = { w = 9, h = 20 }, -- cell pixels when the tty reports none
 }
 ```
 
 `:ArRender [toggle|on|off|render]` controls the current buffer. Other
 plugins can ask for a re-upload with `User ArRenderResend`, as the yazi
-column does after yazi erases its image preview. `AR_TERM_RENDER_IMAGES=0`
-turns images off.
+column does after yazi erases its image preview. `setup()` can run again; each
+call starts from the defaults. The backstop re-upload sleeps on `FocusLost` and
+wakes on `FocusGained`, so tmux needs `focus-events on`.
 
 ## Tests
 
