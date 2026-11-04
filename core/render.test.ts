@@ -398,7 +398,8 @@ test('a layout that times out leaves the fence alone and a marker that later ses
 })
 
 test('math has its own cap (12), separate from the 3 figures', opts, () => {
-  const { r, done } = setup()
+  // A generous budget keeps the cap, not machine speed, deciding what stays text.
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: 60_000 })
   const eqs = Array.from({ length: 14 }, (_v, i) => MATH(`x_{${i}} = ${i}`)).join('\n\n')
   const out = r.transform(eqs, { width: 80 })
   assert.equal(out.match(/x_\{\d+\}/g)!.length, 2, 'two blocks past the cap stay as text')

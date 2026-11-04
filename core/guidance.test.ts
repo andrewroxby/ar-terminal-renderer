@@ -10,7 +10,8 @@ test('guidance names every drawable kind and stays short and single-line', () =>
 
 test('guidance leaves out mermaid when it cannot be drawn', () => {
   const g = guidance(false)
-  assert.ok(!g.includes('mermaid'))
+  assert.ok(!/mermaid/i.test(g))
+  assert.ok(g.startsWith('Your terminal draws pictures and LaTeX inline.'))
   assert.ok(g.includes('```svg') && g.includes('$$'))
   assert.equal(guidance(true), GUIDANCE)
 })
