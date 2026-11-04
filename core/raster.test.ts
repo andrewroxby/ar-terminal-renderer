@@ -87,3 +87,37 @@ test('rsvg on stdin refuses file://, absolute and relative image references', op
   }
   rmSync(dir, { recursive: true })
 })
+
+const hasMagick = spawnSync('magick', ['-version']).status === 0
+
+// RGBA of one pixel, as "r,g,b,a" with 0-255 channels.
+function pixel(png: string, x: number, y: number): string {
+  const r = spawnSync('magick', [png, '-format', `%[fx:int(255*p{${x},${y}}.r)],%[fx:int(255*p{${x},${y}}.g)],%[fx:int(255*p{${x},${y}}.b)],%[fx:int(255*p{${x},${y}}.a)]`, 'info:'], { encoding: 'utf8' })
+  return r.stdout.trim()
+}
+
+test('a card is drawn from the indent on, and the indent stays transparent', { skip: hasRsvg && hasMagick ? false : 'rsvg or magick missing' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-r-'))
+  const l = layout(20, 10, 80, { w: 9, h: 18 }, 2, 2)
+  assert.equal(l.cardX, 18)
+  const p = render({ svg: GOOD, layout: l, bg: '#1e1e2e', cacheDir: dir })!
+  assert.equal(pixel(p, 0, 0), '0,0,0,0')
+  assert.equal(pixel(p, 17, l.pxH - 1), '0,0,0,0')
+  assert.equal(pixel(p, 18, 0), '30,30,46,255') // card color, first card column
+  assert.equal(pixel(p, l.pxW - 1, l.pxH - 1), '30,30,46,255')
+  const [r, g, b, a] = pixel(p, l.left + Math.floor(l.fitW / 2), l.top + Math.floor(l.fitH / 2)).split(',')
+  assert.deepEqual([r, g, b, a], ['51', '102', '153', '255']) // the figure, #369
+  // The same figure and card without the indent is another cache entry.
+  const flush = ro(GOOD, dir)
+  assert.notEqual(render(flush), p)
+  rmSync(dir, { recursive: true })
+})
+
+test('a figure root with its own x, y, width and height still lands in its place', { skip: hasRsvg && hasMagick ? false : 'rsvg or magick missing' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-r-'))
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" x="500" y="500" width="9" height="9" viewBox="0 0 20 10"><rect width="20" height="10" fill="#369"/></svg>'
+  const l = layout(20, 10, 80, { w: 9, h: 18 }, 2, 2)
+  const p = render({ svg, layout: l, bg: '#1e1e2e', cacheDir: dir })!
+  assert.equal(pixel(p, l.left + 2, l.top + 2), '51,102,153,255')
+  rmSync(dir, { recursive: true })
+})

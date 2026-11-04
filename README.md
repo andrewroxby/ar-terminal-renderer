@@ -15,7 +15,15 @@ Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
 - `sanitizeSvg` caps size at 200 KB, adds `xmlns`/`viewBox`, strips external
   `href`s and CSS `url()`/`@import`.
 - `rsvg-convert` rasterizes onto a card, letterboxed to whole cells, cached
-  under `$TMPDIR/ar-term-render/` (7-day expiry).
+  under `$TMPDIR/ar-term-render/` (7-day expiry). The card is a rect in a
+  wrapper SVG, with the figure nested on it, so the page stays transparent
+  to the left of the card.
+- Every block kind (card figures and math) sits `INDENT` cells in from the
+  left, 2 by default, as transparent space inside the image, because Markdown
+  strips leading spaces from a paragraph. `AR_TERM_RENDER_INDENT` (integer
+  0-8) overrides it. A block drops the indent whenever keeping it would shrink
+  the figure, which is when the pane is too narrow for the figure at its
+  natural size. Inside a list item the visual indent adds to the list's.
 - Kitty `a=T,U=1` transmit, each escape wrapped for tmux passthrough
   (`\ePtmux;`, doubled ESC) when `$TMUX` is set. A local viewer
   (`graphics=file`) gets one `t=f` escape carrying the cached PNG's path;
@@ -46,7 +54,7 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
   like) are left out, because MathJax keeps definitions for the life of the
   process; a block that uses one keeps its text. Math is drawn without a card,
   in the theme's text color, at 0.8 em per cell height (about the size of the
-  terminal's own letters), indented two cells.
+  terminal's own letters).
   `\tag{n}` becomes trailing text. Up to 12 per message.
 - **Mermaid** goes through `beautiful-mermaid` onto the card (catppuccin-mocha
   palette). Layout runs in a worker thread with a 2 s limit, and sources over
@@ -68,6 +76,7 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
 ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--size N] [--scale N] [--padding N] [-o FILE] [LATEX]
 ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   # SVG on stdin
 ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     # diagram on stdin
+ar-term-render demo [FILE]                                                   # draw Markdown at the terminal width
 ```
 
 Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
@@ -76,6 +85,14 @@ short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
 device scale 2 (one em is size x scale x 1.83 pixels), so Neovim's termtex can
 call it in place of `termtex-img`. A cache miss takes about 120 ms (node 40,
 MathJax load and conversion 40, rsvg 10, TS and argument handling the rest).
+
+`demo` runs the real Renderer over FILE (default `core/demo.md`: an SVG, a wide
+and a tall Mermaid diagram, two math blocks and a code block) at the terminal
+width minus one. It waits for background renders, writes the image data, then
+prints the transformed Markdown (prose stays raw) and exits, leaving the images
+on screen. Compare indents with `AR_TERM_RENDER_INDENT=3 ar-term-render demo`.
+The sample has no PNG line, because the renderer draws at most three figures
+per message.
 
 ## Pi
 

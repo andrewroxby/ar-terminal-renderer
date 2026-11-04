@@ -13,6 +13,7 @@ import { mathToSvg } from './math.ts'
 import { MERMAID_TIMEOUT_MS, MermaidRunner } from './mermaid.ts'
 import { sanitizeSvg } from './svg.ts'
 import type { Layout } from './layout.ts'
+import { runDemo } from './demo.ts'
 import { defaultCacheDir, lookup, render } from './raster.ts'
 
 // V8 caches the compiled MathJax bundle between runs.
@@ -26,12 +27,15 @@ const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [
                           [--size N] [--scale N] [--padding N] [-o FILE] [LATEX]
        ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   (SVG on stdin)
        ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     (diagram on stdin)
+       ar-term-render demo [FILE]       (draw a Markdown file at the terminal's width)
 
 Writes a PNG and prints its path. LATEX is read from stdin when not given.
 tex: transparent background, default color #cdd6f4. --size is a font size in
 logical pixels (default 32, as termtex-img's -s) and --scale the device pixel
 ratio (default 2), so one em is size x scale x 1.83 pixels. svg and mermaid
-draw at --scale pixels per drawing unit. --padding is in logical pixels.`
+draw at --scale pixels per drawing unit. --padding is in logical pixels.
+demo prints FILE (default: a bundled sample) through the renderer, leaving the
+images on screen; AR_TERM_RENDER_INDENT=0-8 sets the left indent in cells.`
 
 // Pixels of em per unit of size, matching termtex-img's -s at scale 2
 // (measured: a 16-px-size formula has a 58-px em).
@@ -81,6 +85,7 @@ function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out:
     pxH: fitH + 2 * pad,
     left: pad,
     top: pad,
+    cardX: 0,
   }
   if (layout.pxW > MAX_SIDE || layout.pxH > MAX_SIDE || layout.pxW * layout.pxH > MAX_PIXELS) {
     throw new Fail(`image would be ${layout.pxW}x${layout.pxH} pixels, too large`)
@@ -123,6 +128,10 @@ export async function main(argv: string[]): Promise<string> {
   const pad = Math.round(num('--padding', values.padding, 0) * scale)
   if (scale <= 0) throw new Fail('--scale must be positive', 2)
 
+  if (cmd === 'demo') {
+    await runDemo(rest[0])
+    return ''
+  }
   if (cmd === 'tex') {
     if (values.display && values.inline) throw new Fail('--display and --inline conflict', 2)
     const tex = (rest.length ? rest.join(' ') : readStdin()).trim()
@@ -157,7 +166,8 @@ export async function main(argv: string[]): Promise<string> {
 
 if (import.meta.main) {
   try {
-    process.stdout.write((await main(process.argv.slice(2))) + '\n')
+    const out = await main(process.argv.slice(2))
+    if (out) process.stdout.write(out + '\n')
   } catch (e) {
     if (e instanceof Fail) {
       if (e.code === 0) process.stdout.write(USAGE + '\n')

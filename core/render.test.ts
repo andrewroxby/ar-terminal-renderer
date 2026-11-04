@@ -473,3 +473,66 @@ test('indented fallback text and padding carry the indent', () => {
   assert.equal(out, '- item\n  \n  [figure: Box]\n  \n- next')
   done()
 })
+
+// The left indent: every kind sits AR_TERM_RENDER_INDENT cells in from the left
+// (default 2) as transparent space, unless that would shrink the figure.
+const IMG = (indent?: number): NodeJS.ProcessEnv =>
+  indent === undefined ? { AR_TERM_RENDER_IMAGES: '1' } : { AR_TERM_RENDER_IMAGES: '1', AR_TERM_RENDER_INDENT: String(indent) }
+
+const colsOf = (out: string): number => (rowsOf(out)[0]!.match(new RegExp(PLACEHOLDER, 'gu')) ?? []).length
+
+// Placeholder columns of the first drawn block, waiting for a background render if there is one.
+async function colsAt(md: string, width: number, indent?: number): Promise<number> {
+  const { r, done } = setup(IMG(indent))
+  try {
+    let out = r.transform(md, { width })
+    for (let i = 0; i < 3 && r.pending(); i++) {
+      await r.idle()
+      out = r.transform(md, { width })
+    }
+    return colsOf(out)
+  } finally {
+    r.forget()
+    done()
+  }
+}
+
+const WIDE_SVG = '```svg\n<svg viewBox="0 0 1800 300"><rect width="1800" height="300" fill="#369"/></svg>\n```'
+const WIDE_MATH = MATH(Array.from({ length: 60 }, (_, i) => `a_{${i}}`).join(' + '))
+const WIDE_FLOW = '```mermaid\nflowchart LR\n  A[Receive request] --> B[Parse payload] --> C[Validate fields] --> D[Transform records] --> E[Store results] --> F[Send notification]\n  C --> G[Reject request]\n```'
+const SMALL_MATH = MATH('x^2')
+const SMALL_FLOW = '```mermaid\nflowchart LR\n  A --> B\n```'
+
+for (const [kind, small, wide] of [
+  ['svg', fence('Box'), WIDE_SVG],
+  ['math', SMALL_MATH, WIDE_MATH],
+  ['mermaid', SMALL_FLOW, WIDE_FLOW],
+] as const) {
+  test(`indent, ${kind}: a small figure is indented by the setting, 0 turns it off`, opts, async () => {
+    const flush = await colsAt(small, 80, 0)
+    assert.equal(await colsAt(small, 80), flush + 2)
+    assert.equal(await colsAt(small, 80, 2), flush + 2)
+    assert.equal(await colsAt(small, 80, 3), flush + 3)
+  })
+
+  test(`indent, ${kind}: a wide figure is flush left when the pane would shrink it, indented when it would not`, opts, async () => {
+    assert.equal(await colsAt(wide, 40, 0), 38)
+    assert.equal(await colsAt(wide, 40, 2), 38)
+    assert.equal(await colsAt(wide, 40, 3), 38)
+    const flush = await colsAt(wide, 190, 0)
+    assert.equal(await colsAt(wide, 190, 2), flush + 2)
+    assert.equal(await colsAt(wide, 190, 3), flush + 3)
+  })
+}
+
+test('indent: a list item keeps its own indent and adds the figure indent', opts, () => {
+  const { r, done } = setup(IMG())
+  const flush = setup(IMG(0))
+  const md = `- item\n\n  ${MATH('x^2').replace(/\n/g, '\n  ')}`
+  const out = r.transform(md, { width: 80 })
+  const row = rowsOf(out)[0]!
+  assert.ok(row.startsWith('  '))
+  assert.equal(colsOf(out), colsOf(flush.r.transform(md, { width: 80 })) + 2)
+  done()
+  flush.done()
+})

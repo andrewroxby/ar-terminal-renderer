@@ -43,18 +43,34 @@ test('\\tag becomes trailing text', () => {
   assert.equal(normalizeTex('  a  '), 'a')
 })
 
-test('math layout: 0.8 em per cell height, two-cell indent, shrinks only to fit', () => {
+test('math layout: 0.8 em per cell height, indented, shrinks only to fit', () => {
   const cell = { w: 9, h: 18 }
-  const small = layoutMath(2500, 1250, 80, cell) // 2.5 em wide, 1.25 em tall
+  const small = layoutMath(2500, 1250, 80, cell, 2) // 2.5 em wide, 1.25 em tall
   assert.equal(small.fitW, 36)
   assert.equal(small.fitH, 18)
   assert.equal(small.left, 18)
   assert.equal(small.rows, 1)
   assert.equal(small.cols, 6)
-  const wide = layoutMath(200_000, 1000, 40, cell)
-  assert.equal(wide.cols, 38)
-  assert.ok(wide.left + wide.fitW <= 38 * 9)
-  assert.equal(layoutMath(2500, 1250, 10, cell).left, 0) // too narrow to indent
+  assert.equal(layoutMath(2500, 1250, 80, cell, 3).left, 27)
+  assert.equal(layoutMath(2500, 1250, 80, cell).left, 0)
+})
+
+test('math that would shrink under the indent sits flush left at full width', () => {
+  const cell = { w: 9, h: 18 }
+  // Too wide for 40 columns: indenting would shrink it.
+  const flush = layoutMath(200_000, 1000, 40, cell, 2)
+  assert.equal(flush.left, 0)
+  assert.equal(flush.cols, 38)
+  assert.equal(flush.fitW, 38 * 9)
+  // The same formula in 190 columns is capped at 100 columns either way, so it is indented.
+  const roomy = layoutMath(200_000, 1000, 190, cell, 2)
+  assert.equal(roomy.left, 18)
+  assert.equal(roomy.cols, 102)
+  assert.equal(roomy.fitW, 100 * 9)
+  // A formula that fits after the indent keeps it, one that fits only without drops it.
+  assert.equal(layoutMath(22_000, 1000, 40, cell, 2).left, 18) // 317 px, room for 324
+  assert.equal(layoutMath(23_000, 1000, 40, cell, 2).left, 0) // 331 px, fits flush (342) but not indented
+  assert.equal(layoutMath(2500, 1250, 10, cell, 2).left, 18) // a small formula fits even in a narrow pane
 })
 
 // MathJax's macro maps are shared by the whole process, so a definition in

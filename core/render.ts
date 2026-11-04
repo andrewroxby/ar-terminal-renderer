@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { DEFAULT_CARD, DEFAULT_MATH } from './color.ts'
-import { defaultRun, detectGraphics, tmuxCell, type Availability, type Run } from './env.ts'
+import { defaultRun, detectGraphics, indentFromEnv, tmuxCell, type Availability, type Run } from './env.ts'
 import { DEFAULT_CELL, layout as computeLayout, layoutMath, type Cell, type Layout } from './layout.ts'
 import { mathToSvg } from './math.ts'
 import { MermaidRunner, mermaidAvailable, refuseMermaid } from './mermaid.ts'
@@ -59,6 +59,7 @@ interface Source {
   vh: number
   // card: a padded, letterboxed picture on the card color.
   // math: bare text-like math, transparent, 0.8 em per cell height.
+  // Both sit indent cells in from the left unless that would shrink them.
   style: 'card' | 'math'
   maxScale: number
 }
@@ -94,6 +95,7 @@ export class Renderer {
   private mermaid = new MermaidRunner()
   private env: NodeJS.ProcessEnv
   private run: Run
+  private indent: number
   private now: () => number
   private langs: Set<string>
   private sent = new Set<number>()
@@ -109,6 +111,7 @@ export class Renderer {
   private queue: { key: string; run: () => Promise<boolean> }[] = []
   private queued = new Set<string>()
   private draining = false
+  private idleWaiters: (() => void)[] = []
   private unsent = new Map<number, Drawn>()
   private retry: ReturnType<typeof setTimeout> | undefined
 
@@ -116,6 +119,7 @@ export class Renderer {
     this.o = o
     this.env = o.env ?? process.env
     this.run = o.run ?? defaultRun
+    this.indent = indentFromEnv(this.env)
     this.now = o.now ?? Date.now
     this.cacheDir = o.cacheDir ?? defaultCacheDir()
     this.langs = new Set(FENCE_KINDS.map((k) => k.lang))
@@ -177,6 +181,18 @@ export class Renderer {
     return out
   }
 
+  // True while figures are still rendering in the background.
+  pending(): boolean {
+    return this.draining || this.queue.length > 0
+  }
+
+  // Resolves once the background renders queued so far are done. A host that
+  // can exit before they land holds the process open until then.
+  idle(): Promise<void> {
+    if (!this.pending()) return Promise.resolve()
+    return new Promise((resolve) => this.idleWaiters.push(resolve))
+  }
+
   // Sends the most recently used images again, for a client that attached
   // late or a terminal that lost its store. Returns how many were sent.
   redraw(): number {
@@ -224,7 +240,8 @@ export class Renderer {
     const cell = this.cell()
     const card = this.o.card?.() ?? DEFAULT_CARD
     const mathColor = this.o.mathColor?.() ?? DEFAULT_MATH
-    const geom = `${width}|${cell.w}x${cell.h}|${card}|${mathColor}`
+    const indent = this.indent
+    const geom = `${width}|${cell.w}x${cell.h}|${indent}|${card}|${mathColor}`
 
     let key: string
     let expensive = false
@@ -238,7 +255,7 @@ export class Renderer {
       const digest = createHash('sha256').update((b.kind === 'fence' ? b.lang : '$$') + '\0' + b.body).digest('hex')
       expensive = b.kind === 'math'
       skey = `${b.kind === 'fence' ? b.lang : 'math'}|${digest}|${card}|${mathColor}`
-      key = `${skey}|${width}|${cell.w}x${cell.h}`
+      key = `${skey}|${width}|${cell.w}x${cell.h}|${indent}`
       if (b.kind === 'math') {
         make = () => {
           const m = mathToSvg(b.body, mathColor)
@@ -299,7 +316,9 @@ export class Renderer {
 
     const finish = (src: Source): RasterOptions => {
       const layout: Layout =
-        src.style === 'math' ? layoutMath(src.vw, src.vh, width, cell) : computeLayout(src.vw, src.vh, width, cell, src.maxScale)
+        src.style === 'math'
+          ? layoutMath(src.vw, src.vh, width, cell, indent)
+          : computeLayout(src.vw, src.vh, width, cell, src.maxScale, indent)
       return { svg: src.svg, layout, bg: src.style === 'math' ? null : card, cacheDir: this.cacheDir }
     }
 
@@ -414,6 +433,7 @@ export class Renderer {
       this.queued.delete(item.key)
     }
     this.draining = false
+    for (const w of this.idleWaiters.splice(0)) w()
     if (ready) this.o.onReady?.()
   }
 

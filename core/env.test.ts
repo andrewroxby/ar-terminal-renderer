@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { detectGraphics, tmuxCell, type Run } from './env.ts'
+import { detectGraphics, indentFromEnv, tmuxCell, type Run } from './env.ts'
 
 const tmuxRun = (viewer: string | null, term = ''): Run => (_c, args) =>
   args.includes('@viewer') ? viewer : args.some((a) => a.includes('client_termname')) ? term : null
@@ -43,4 +43,12 @@ test('transport mode: file only for a local viewer, inline otherwise, env can fo
   assert.equal(detectGraphics({ TERM_PROGRAM: 'ghostty' }, () => null).mode, 'inline')
   assert.equal(detectGraphics({ ...t, AR_TERM_RENDER_TRANSPORT: 'inline' }, tmuxRun('graphics=file')).mode, 'inline')
   assert.equal(detectGraphics({ ...t, AR_TERM_RENDER_TRANSPORT: 'file' }, tmuxRun('graphics=inline')).mode, 'file')
+})
+
+test('AR_TERM_RENDER_INDENT is an integer 0-8, else the default 2', () => {
+  assert.equal(indentFromEnv({}), 2)
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '3' }), 3)
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '0' }), 0)
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '8' }), 8)
+  for (const bad of ['9', '-1', '2.5', 'x', '']) assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: bad }), 2, bad)
 })
