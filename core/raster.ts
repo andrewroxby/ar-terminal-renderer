@@ -6,12 +6,13 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, constants, mkdirSync, openSync, readdirSync, renameSync, statSync, unlinkSync, utimesSync, writeSync } from 'node:fs'
+import { closeSync, constants, mkdirSync, openSync, readdirSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Layout } from './layout.ts'
 
 export const CACHE_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+const DAY_MS = 24 * 3600 * 1000
 const RSVG_TIMEOUT_MS = 1500
 const MAX_OUT = 64 * 1024 * 1024
 
@@ -40,6 +41,22 @@ export function sweep(dir: string, maxAgeMs = CACHE_MAX_AGE_MS, now = Date.now()
     } catch {}
   }
   return n
+}
+
+// sweep(), at most once a day (by the mtime of a stamp file), so a short-lived
+// process keeps the cache bounded without listing it on every run.
+export function sweepDaily(dir: string, now = Date.now()): number {
+  const stamp = join(dir, '.swept')
+  try {
+    if (now - statSync(stamp).mtimeMs < DAY_MS) return 0
+  } catch {}
+  try {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(stamp, '')
+  } catch {
+    return 0
+  }
+  return sweep(dir, CACHE_MAX_AGE_MS, now)
 }
 
 export interface RasterOptions {

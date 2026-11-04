@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { detectGraphics, indentFromEnv, tmuxCell, type Run } from './env.ts'
 
 const tmuxRun = (viewer: string | null, term = ''): Run => (_c, args) =>
@@ -53,5 +54,23 @@ test('indents are integers 0-8, else the defaults: 2 for figures, 3 for math', (
   for (const bad of ['9', '-1', '2.5', 'x', '']) {
     assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: bad }).figure, 2, bad)
     assert.equal(indentFromEnv({ AR_TERM_RENDER_MATH_INDENT: bad }).math, 3, bad)
+  }
+})
+
+// The Neovim adapter reads the same file (nvim/tests/terminal_spec.lua), so
+// the two detectors cannot drift apart.
+interface Vector {
+  name: string
+  env: NodeJS.ProcessEnv
+  viewer: string | null
+  term: string | null
+  ok: boolean
+}
+
+test('shared detection vectors', () => {
+  const vectors = JSON.parse(readFileSync(new URL('./test/detect-vectors.json', import.meta.url), 'utf8')) as Vector[]
+  assert.ok(vectors.length > 10)
+  for (const v of vectors) {
+    assert.equal(detectGraphics(v.env, tmuxRun(v.viewer, v.term ?? '')).ok, v.ok, v.name)
   }
 })

@@ -82,7 +82,7 @@ ar-term-render demo [FILE]                                                   # d
 
 Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
 short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
-`#cdd6f4` by default. `--em-px N` sets one em in device pixels (default 64;
+`#d4d4d4` by default. `--em-px N` sets one em in device pixels (default 64;
 Pi's display math is `0.8 x` cell height), and `--cell WxH` pads the PNG to
 whole cells with the formula at the left and centered vertically, the way Pi
 lays out display math, so a terminal can show it without stretching.

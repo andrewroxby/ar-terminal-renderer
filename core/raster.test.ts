@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { lookup, render, renderAsync, sweep, CACHE_MAX_AGE_MS, type RasterOptions } from './raster.ts'
+import { lookup, render, renderAsync, sweep, sweepDaily, CACHE_MAX_AGE_MS, type RasterOptions } from './raster.ts'
 import { layout } from './layout.ts'
 
 const hasRsvg = spawnSync('rsvg-convert', ['--version']).status === 0
@@ -59,6 +59,26 @@ test('stale .fail markers expire with the cache rule', () => {
   utimesSync(f, old, old)
   assert.equal(sweep(dir), 1)
   assert.ok(!existsSync(f))
+  rmSync(dir, { recursive: true })
+})
+
+test('sweepDaily sweeps once, then not again until a day has passed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-sd-'))
+  const stale = (name: string) => {
+    const f = join(dir, name)
+    writeFileSync(f, 'x')
+    const old = new Date(Date.now() - CACHE_MAX_AGE_MS - 1000)
+    utimesSync(f, old, old)
+    return f
+  }
+  const a = stale('a.png')
+  assert.equal(sweepDaily(dir), 1)
+  assert.ok(!existsSync(a))
+  const b = stale('b.png')
+  assert.equal(sweepDaily(dir), 0, 'the stamp is fresh')
+  assert.ok(existsSync(b))
+  assert.equal(sweepDaily(dir, Date.now() + 25 * 3600 * 1000), 1)
+  assert.ok(!existsSync(b))
   rmSync(dir, { recursive: true })
 })
 

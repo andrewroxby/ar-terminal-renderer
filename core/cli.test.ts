@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { MATH_EM, layoutMath } from './layout.ts'
+import { DEFAULT_MATH } from './color.ts'
 import { mathToSvg } from './math.ts'
 
 const CLI = fileURLToPath(new URL('./cli.ts', import.meta.url))
@@ -41,6 +42,12 @@ test('tex writes a transparent PNG and prints its path', opts, () => {
   assert.equal(cli(['tex', '\\frac{a+b}{2}+x^2']).stdout.trim(), path, 'same arguments, same cached file')
 })
 
+test('the default color is the one Pi draws math in', opts, () => {
+  const a = cli(['tex', 'x^2']).stdout.trim()
+  assert.equal(cli(['tex', '--color', DEFAULT_MATH, 'x^2']).stdout.trim(), a)
+  assert.notEqual(cli(['tex', '--color', '#123456', 'x^2']).stdout.trim(), a)
+})
+
 test('--em-px scales the image, 64 by default; --padding adds logical pixels at --scale', opts, () => {
   const w = (args: string[]) => png(cli(['tex', '-p', '0', ...args, '\\frac{a+b}{2}+x^2']).stdout.trim()).w
   const base = w([])
@@ -54,7 +61,7 @@ test('--em-px sets one em in pixels, as Pi sets display math (0.8 of the cell he
   const tex = '\\frac{a+b}{2}+x^2'
   const svg = mathToSvg(tex, '#cdd6f4', true)!
   const cell = { w: 24, h: 48 }
-  const want = layoutMath(svg.vw, svg.vh, 200, cell, 0)
+  const want = layoutMath(svg.vw, svg.vh, 200, cell, 0)!
   const r = cli(['tex', '--display', '-p', '0', '--em-px', String(cell.h * MATH_EM), tex])
   assert.equal(r.status, 0, r.stderr)
   assert.deepEqual([png(r.stdout.trim()).w, png(r.stdout.trim()).h], [want.fitW, want.fitH])

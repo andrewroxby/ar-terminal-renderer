@@ -14,7 +14,16 @@ import { MERMAID_TIMEOUT_MS, MermaidRunner } from './mermaid.ts'
 import { sanitizeSvg } from './svg.ts'
 import type { Cell, Layout } from './layout.ts'
 import { runDemo } from './demo.ts'
-import { defaultCacheDir, lookup, render } from './raster.ts'
+import { DEFAULT_MATH } from './color.ts'
+import { defaultCacheDir, lookup, render, sweepDaily } from './raster.ts'
+
+// import.meta.main arrived in the same Node releases (22.18, 24.2) that run
+// .ts files without a flag. Anything older would skip main() and exit 0 with
+// no output, so it fails here instead.
+if (import.meta.main === undefined) {
+  process.stderr.write(`ar-term-render: needs Node 22.18+ or 24.2+ (this is ${process.version})\n`)
+  process.exit(1)
+}
 
 // V8 caches the compiled MathJax bundle between runs.
 if (import.meta.main) {
@@ -30,7 +39,7 @@ const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [
        ar-term-render demo [FILE]       (draw a Markdown file at the terminal's width)
 
 Writes a PNG and prints its path. LATEX is read from stdin when not given.
-tex: transparent background, default color #cdd6f4. --em-px sets one em in
+tex: transparent background, default color #d4d4d4. --em-px sets one em in
 device pixels (default 64), and --cell WxH pads the image to whole cells of that
 pixel size, formula at the left and centered vertically, as Pi lays out display
 math. svg and mermaid draw at --scale pixels per drawing unit. --padding is in
@@ -104,6 +113,7 @@ function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out:
     throw new Fail(`image would be ${layout.pxW}x${layout.pxH} pixels, too large`)
   }
   const o = { svg: svg.svg, layout, bg, cacheDir: defaultCacheDir() }
+  sweepDaily(o.cacheDir)
   const hit = lookup(o)
   const path = hit.state === 'hit' ? hit.path : hit.state === 'miss' ? render(o) : null
   if (!path) throw new Fail('rendering failed (is rsvg-convert installed?)')
@@ -153,7 +163,7 @@ async function main(argv: string[]): Promise<string> {
     const emPx = num('--em-px', values['em-px'], DEFAULT_EM_PX)
     if (emPx === 0) throw new Fail('--em-px must be positive', 2)
     const cell = parseCell(values.cell)
-    const color = hex('--color', values.color, '#cdd6f4')!
+    const color = hex('--color', values.color, DEFAULT_MATH)!
     const bg = hex('--background', values.background, null)
     const clean = mathToSvg(tex, color, !values.inline)
     if (!clean) throw new Fail('could not typeset that LaTeX')
