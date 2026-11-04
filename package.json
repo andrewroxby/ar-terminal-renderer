@@ -1,12 +1,13 @@
 {
   "name": "ar-term-render",
   "version": "0.1.0",
-  "description": "Inline figures for Pi: SVG fences and PNG paths drawn in the terminal transcript through kitty graphics, tmux-safe",
+  "description": "SVG, Mermaid and math drawn in the terminal through kitty graphics, tmux-safe: engine, CLI, Pi adapter and Neovim adapter",
   "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "npm run typecheck && npm run build && npm run test:core",
+    "test:nvim": "make -C nvim test",
     "test:core": "node --test 'core/**/*.test.ts' 'pi/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
     "build": "esbuild core/vendor-src/mathjax.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mathjax.cjs --log-level=warning && esbuild core/vendor-src/mermaid-worker.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mermaid-worker.cjs --log-level=warning"

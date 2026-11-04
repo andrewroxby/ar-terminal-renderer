@@ -1,7 +1,8 @@
 # ar-term-render
 
-Draws SVG and PNG pictures inline in a terminal transcript. `core/` is the
-host-neutral engine (no Pi imports); `pi/` is the Pi adapter, `arπ-render`.
+Draws SVG and PNG pictures and typeset math in a terminal. `core/` is the
+host-neutral engine (no Pi imports), with a CLI; `pi/` is the Pi adapter,
+`arπ-render`; `nvim/` is the Neovim adapter, `ar-term-render.nvim`.
 
 Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
 `![caption](/abs/path.png)` lines, ```` ```mermaid ```` fences and `$$…$$` /
@@ -73,7 +74,7 @@ asks the TUI to rebuild when they are ready. rsvg failures are remembered as
 ## CLI
 
 ```
-ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--size N | --em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
+ar-term-render tex [--display|--inline] [--color #hex] [--background #hex] [--em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
 ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   # SVG on stdin
 ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     # diagram on stdin
 ar-term-render demo [FILE]                                                   # draw Markdown at the terminal width
@@ -81,13 +82,13 @@ ar-term-render demo [FILE]                                                   # d
 
 Writes a PNG (the cached file, or `-o`) and prints its path; exit 1 with a
 short stderr message on failure, 2 on bad usage. `tex` is transparent, colour
-`#cdd6f4` by default, and `--size` / `--scale` match termtex-img's `-s` at
-device scale 2 (one em is size x scale x 1.83 pixels), so Neovim's termtex can
-call it in place of `termtex-img`. `--em-px N` sets one em in device pixels
-directly (Pi's display math is `0.8 x` cell height), and `--cell WxH` pads the
-PNG to whole cells with the formula at the left and centered vertically, the
-way Pi lays out display math, so a terminal can show it without stretching. A cache miss takes about 120 ms (node 40,
-MathJax load and conversion 40, rsvg 10, TS and argument handling the rest).
+`#cdd6f4` by default. `--em-px N` sets one em in device pixels (default 64;
+Pi's display math is `0.8 x` cell height), and `--cell WxH` pads the PNG to
+whole cells with the formula at the left and centered vertically, the way Pi
+lays out display math, so a terminal can show it without stretching.
+`--padding` is in logical pixels, which `--scale` (default 2) turns into
+device pixels. A cache miss takes about 120 ms (node 40, MathJax load and
+conversion 40, rsvg 10, TS and argument handling the rest).
 
 `demo` runs the real Renderer over FILE (default `core/demo.md`: an SVG, a wide
 and a tall Mermaid diagram, two math blocks and a code block) at the terminal
@@ -106,9 +107,71 @@ watcher resends images when tmux-viewer reports a new client. When graphics
 are available, `before_agent_start` appends one guidance line
 (`core/guidance.ts`) to the system prompt.
 
+## Neovim
+
+`nvim/` is a Neovim plugin that draws LaTeX math in Markdown buffers without
+touching the file. Display math (`$$…$$`, `\[…\]`, and ```` ```math ```` fences)
+and inline math (`$…$`, `\(…\)`) is replaced by the render, and the cursor
+line always shows the source. Fences, `` `code` `` spans, table rows and
+currency such as `$5 and $10` are left alone.
+
+Install it from the checkout with lazy.nvim, which adds the directory to the
+runtime path:
+
+```lua
+{
+  dir = vim.fn.expand("~/dev/ar-term-render/nvim"),
+  name = "ar-term-render.nvim",
+  ft = "markdown",
+  config = function()
+    require("ar_term_render").setup()
+  end,
+}
+```
+
+On a terminal that speaks kitty graphics (kitty, Ghostty, herdr, or tmux
+under either), math is typeset as an image by the `tex` command above, sized
+from the terminal's cell pixels like Pi: display math at 0.8 em per cell
+height, left-aligned `display_indent` columns in, shrinking to fit the window
+and dropping the indent first. Inline math is drawn at 0.7 em and must fit one
+row. Images are transmitted inline, so they reach remote clients, and are
+re-sent when the view changes or another program clears them. Everywhere else,
+and for math an image cannot carry (inline math needing more than one row,
+fractions and matrices inline, TeX the renderer rejects), the plugin draws
+Unicode text with the `cellmath` CLI, as Pi and Claude Code do. cellmath does
+not wrap, so display art wider than the window stays as source. If the
+renderer is missing, everything draws as cellmath text.
+
+Requirements: Neovim (tested on 0.12), `node` and `rsvg-convert` for images, `cellmath`
+on `PATH` for text. The renderer is `ar-term-render` on `PATH`, else
+`core/cli.ts` in this checkout. PNGs are cached under
+`stdpath("cache")/ar-term-render`.
+
+Options for `setup()` (defaults shown):
+
+```lua
+{
+  filetypes = { "markdown" },
+  images = true,         -- false forces cellmath text
+  debounce = 300,        -- ms of quiet before a buffer is rescanned
+  display_indent = 3,    -- columns in from the text start
+  display_align = "left", -- "center" ignores display_indent
+  resend = true,         -- re-upload images that were cleared
+  resend_every = 3000,   -- ms between backstop re-uploads; 0 for none
+}
+```
+
+`:ArRender [toggle|on|off|render]` controls the current buffer. Other
+plugins can ask for a re-upload with `User ArRenderResend`, as the yazi
+column does after yazi erases its image preview. `AR_TERM_RENDER_IMAGES=0`
+turns images off.
+
 ## Tests
 
 `npm test` runs the type check and the node:test suites, including a pty test
-against a private tmux server. `python3 pi/test/live-check.py` runs a live Pi
-in a private tmux server (`-L figproto`) with a cheap Fireworks model; it needs
-`rsvg-convert`, `tmux` and API keys in `~/.pi/agent/auth.json`.
+against a private tmux server. `npm run test:nvim` runs the plugin's plenary
+specs headless; it needs `nvim` with `plenary.nvim` installed through lazy,
+and each group skips itself when its programs are missing.
+`python3 pi/test/live-check.py` runs a live Pi in a private tmux server
+(`-L figproto`) with a cheap Fireworks model; it needs `rsvg-convert`, `tmux`
+and API keys in `~/.pi/agent/auth.json`.

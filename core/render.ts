@@ -19,9 +19,9 @@ import { sanitizeSvg } from './svg.ts'
 
 export const MAX_FIGURES = 3
 export const MAX_MATH = 12
-export const MAX_PNG_BYTES = 10 * 1024 * 1024
-export const MAX_PNG_PIXELS = 16_000_000
-export const RASTER_BUDGET_MS = 300
+const MAX_PNG_BYTES = 10 * 1024 * 1024
+const MAX_PNG_PIXELS = 16_000_000
+const RASTER_BUDGET_MS = 300
 const MEMO_TTL_MS = 2000
 const MAX_RESEND = 30
 const LRU_CAP = 128

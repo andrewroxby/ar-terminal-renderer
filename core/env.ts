@@ -74,7 +74,7 @@ export function tmuxCell(run: Run): Cell | null {
 
 // Left indents in cells, each an integer 0-8, else its default:
 // AR_TERM_RENDER_INDENT for figures, AR_TERM_RENDER_MATH_INDENT for math.
-export const MAX_INDENT = 8
+const MAX_INDENT = 8
 
 function indentVar(v: string | undefined, fallback: number): number {
   const s = v?.trim()

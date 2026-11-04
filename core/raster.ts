@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import type { Layout } from './layout.ts'
 
 export const CACHE_MAX_AGE_MS = 7 * 24 * 3600 * 1000
-export const RSVG_TIMEOUT_MS = 1500
+const RSVG_TIMEOUT_MS = 1500
 const MAX_OUT = 64 * 1024 * 1024
 
 export function defaultCacheDir(): string {
@@ -49,7 +49,7 @@ export interface RasterOptions {
   cacheDir: string
 }
 
-export type Lookup = { state: 'hit'; path: string } | { state: 'fail' } | { state: 'miss' }
+type Lookup = { state: 'hit'; path: string } | { state: 'fail' } | { state: 'miss' }
 
 function paths(o: RasterOptions): { png: string; fail: string } {
   const l = o.layout

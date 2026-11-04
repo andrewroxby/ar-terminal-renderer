@@ -7,7 +7,7 @@
 import { mkdirSync, rmdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const STALE_LOCK_MS = 3000
+const STALE_LOCK_MS = 3000
 const SLEEP = new Int32Array(new SharedArrayBuffer(4))
 
 export function tryLock(dir: string, waitMs: number, staleMs = STALE_LOCK_MS): (() => void) | null {

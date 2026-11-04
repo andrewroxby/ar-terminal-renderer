@@ -24,26 +24,22 @@ if (import.meta.main) {
 }
 
 const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [--background #hex]
-                          [--size N | --em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
+                          [--em-px N] [--scale N] [--padding N] [--cell WxH] [-o FILE] [LATEX]
        ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   (SVG on stdin)
        ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     (diagram on stdin)
        ar-term-render demo [FILE]       (draw a Markdown file at the terminal's width)
 
 Writes a PNG and prints its path. LATEX is read from stdin when not given.
-tex: transparent background, default color #cdd6f4. --size is a font size in
-logical pixels (default 32, as termtex-img's -s) and --scale the device pixel
-ratio (default 2), so one em is size x scale x 1.83 pixels. --em-px instead sets
-one em in device pixels directly (--size and --scale then no longer size it), and
---cell WxH pads the image to whole cells of that pixel size, formula at the top
-left and centered vertically, as Pi lays out display math. svg and mermaid
-draw at --scale pixels per drawing unit. --padding is in logical pixels.
+tex: transparent background, default color #cdd6f4. --em-px sets one em in
+device pixels (default 64), and --cell WxH pads the image to whole cells of that
+pixel size, formula at the left and centered vertically, as Pi lays out display
+math. svg and mermaid draw at --scale pixels per drawing unit. --padding is in
+logical pixels, which --scale (default 2) turns into device pixels.
 demo prints FILE (default: a bundled sample) through the renderer, leaving the
 images on screen; AR_TERM_RENDER_INDENT=0-8 sets the figures' left indent in cells and
 AR_TERM_RENDER_MATH_INDENT=0-8 the display math's.`
 
-// Pixels of em per unit of size, matching termtex-img's -s at scale 2
-// (measured: a 16-px-size formula has a 58-px em).
-const TERMTEX_EM = 1.83
+const DEFAULT_EM_PX = 64
 const MAX_PIXELS = 16_000_000
 const MAX_SIDE = 10_000
 
@@ -116,7 +112,7 @@ function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out:
   return out
 }
 
-export async function main(argv: string[]): Promise<string> {
+async function main(argv: string[]): Promise<string> {
   let parsed
   try {
     parsed = parseArgs({
@@ -128,7 +124,6 @@ export async function main(argv: string[]): Promise<string> {
         color: { type: 'string', short: 'c' },
         background: { type: 'string' },
         card: { type: 'string' },
-        size: { type: 'string', short: 's' },
         'em-px': { type: 'string' },
         cell: { type: 'string' },
         scale: { type: 'string' },
@@ -155,16 +150,14 @@ export async function main(argv: string[]): Promise<string> {
     if (values.display && values.inline) throw new Fail('--display and --inline conflict', 2)
     const tex = (rest.length ? rest.join(' ') : readStdin()).trim()
     if (!tex) throw new Fail('no LaTeX given', 2)
-    if (values.size !== undefined && values['em-px'] !== undefined) throw new Fail('--size and --em-px conflict', 2)
-    const emPx = values['em-px'] === undefined ? null : num('--em-px', values['em-px'], 0)
+    const emPx = num('--em-px', values['em-px'], DEFAULT_EM_PX)
     if (emPx === 0) throw new Fail('--em-px must be positive', 2)
-    const size = num('--size', values.size, 32)
     const cell = parseCell(values.cell)
     const color = hex('--color', values.color, '#cdd6f4')!
     const bg = hex('--background', values.background, null)
     const clean = mathToSvg(tex, color, !values.inline)
     if (!clean) throw new Fail('could not typeset that LaTeX')
-    const unit = (emPx ?? size * scale * TERMTEX_EM) / 1000
+    const unit = emPx / 1000
     return toPng(clean, unit, pad, bg, values.output, cell)
   }
   if (cmd === 'svg') {

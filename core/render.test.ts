@@ -335,7 +335,7 @@ test('mermaid fence stays as written, then is drawn on the card once the worker 
 })
 
 test('unsupported mermaid diagrams are left for Pi', opts, async () => {
-  const { r, writes, dir, done } = setup()
+  const { r, writes, done } = setup()
   const pie = '```mermaid\npie title Pets\n "Dogs" : 5\n```'
   assert.equal(r.transform(pie, { width: 80 }), pie)
   await sleep(500)

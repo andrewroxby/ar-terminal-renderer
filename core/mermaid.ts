@@ -20,7 +20,7 @@ const WORKER_FILE = fileURLToPath(new URL('./vendor/mermaid-worker.cjs', import.
 
 // bad: refused or unparseable, and will stay so. timeout: gave up after the
 // deadline. missing and closed say nothing about the diagram.
-export type MermaidResult =
+type MermaidResult =
   | { state: 'ok'; svg: CleanSvg }
   | { state: 'bad' }
   | { state: 'timeout' }

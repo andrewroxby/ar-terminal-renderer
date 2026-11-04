@@ -7,7 +7,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { Renderer, cardColor, guidance, mathColor, mermaidAvailable } from '../core/index.ts'
 import type { Cell, Options } from '../core/index.ts'
 
-export interface Deps {
+interface Deps {
   renderer?: Renderer
   cellFallback?: () => Cell | undefined
   rendererOptions?: Partial<Options>

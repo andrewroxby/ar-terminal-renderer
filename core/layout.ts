@@ -27,8 +27,8 @@ export interface Layout {
   cardX: number
 }
 
-export const MAX_COLS = 100
-export const MAX_ROWS = 30
+const MAX_COLS = 100
+const MAX_ROWS = 30
 export const PAD = 6
 export const INDENT = 2
 export const MATH_INDENT = 3
