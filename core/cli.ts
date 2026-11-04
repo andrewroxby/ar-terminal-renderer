@@ -8,14 +8,12 @@ import { enableCompileCache } from 'node:module'
 import { join } from 'node:path'
 import process from 'node:process'
 import { parseArgs } from 'node:util'
-import type { CleanSvg } from './svg.ts'
-import { mathToSvg } from './math.ts'
 import { MERMAID_TIMEOUT_MS, MermaidRunner } from './mermaid.ts'
 import { sanitizeSvg } from './svg.ts'
-import type { Cell, Layout } from './layout.ts'
 import { runDemo } from './demo.ts'
-import { DEFAULT_MATH } from './color.ts'
-import { defaultCacheDir, lookup, render, sweepDaily } from './raster.ts'
+import { defaultCacheDir, lookup, render, sweepDaily, type RasterOptions } from './raster.ts'
+import { serve } from './serve.ts'
+import { DEFAULT_EM_PX, Fail, canvas, hex, num, parseCell, texCanvas } from './tex.ts'
 
 // import.meta.main arrived in the same Node releases (22.18, 24.2) that run
 // .ts files without a flag. Anything older would skip main() and exit 0 with
@@ -37,6 +35,7 @@ const USAGE = `usage: ar-term-render tex [--display | --inline] [--color #hex] [
        ar-term-render svg [--background #hex] [--scale N] [--padding N] [-o FILE]   (SVG on stdin)
        ar-term-render mermaid [--card #hex] [--scale N] [--padding N] [-o FILE]     (diagram on stdin)
        ar-term-render demo [FILE]       (draw a Markdown file at the terminal's width)
+       ar-term-render serve             (answer tex requests, one JSON line each, until stdin closes)
 
 Writes a PNG and prints its path. LATEX is read from stdin when not given.
 tex: transparent background, default color #d4d4d4. --em-px sets one em in
@@ -44,41 +43,11 @@ device pixels (default 64), and --cell WxH pads the image to whole cells of that
 pixel size, formula at the left and centered vertically, as Pi lays out display
 math. svg and mermaid draw at --scale pixels per drawing unit. --padding is in
 logical pixels, which --scale (default 2) turns into device pixels.
+serve reads {"id", "tex", "display", "color", "emPx", "cell":"WxH"} lines on stdin and
+answers {"id", "path"} or {"id", "error", "rejected"}; it exits after 10 idle minutes.
 demo prints FILE (default: a bundled sample) through the renderer, leaving the
 images on screen; AR_TERM_RENDER_INDENT=0-8 sets the figures' left indent in cells and
 AR_TERM_RENDER_MATH_INDENT=0-8 the display math's.`
-
-const DEFAULT_EM_PX = 64
-const MAX_PIXELS = 16_000_000
-const MAX_SIDE = 10_000
-
-class Fail extends Error {
-  code: number
-  constructor(message: string, code = 1) {
-    super(message)
-    this.code = code
-  }
-}
-
-function num(name: string, v: string | undefined, fallback: number): number {
-  if (v === undefined) return fallback
-  const n = Number(v)
-  if (!Number.isFinite(n) || n < 0) throw new Fail(`${name} must be a non-negative number`, 2)
-  return n
-}
-
-function hex(name: string, v: string | undefined, fallback: string | null): string | null {
-  if (v === undefined) return fallback
-  if (!/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) throw new Fail(`${name} must be #rgb or #rrggbb`, 2)
-  return v
-}
-
-function parseCell(v: string | undefined): Cell | undefined {
-  if (v === undefined) return undefined
-  const m = /^(\d+)x(\d+)$/.exec(v)
-  if (!m || Number(m[1]) < 1 || Number(m[2]) < 1) throw new Fail('--cell must be WxH in pixels, such as 24x48', 2)
-  return { w: Number(m[1]), h: Number(m[2]) }
-}
 
 function readStdin(): string {
   try {
@@ -88,31 +57,8 @@ function readStdin(): string {
   }
 }
 
-// Rasterizes at `unit` pixels per drawing unit, padded, and returns the path.
-// With `cell`, the canvas grows to whole cells and the figure sits at the left,
-// centered vertically.
-function toPng(svg: CleanSvg, unit: number, pad: number, bg: string | null, out: string | undefined, cell?: Cell): string {
-  const fitW = Math.max(1, Math.round(svg.vw * unit))
-  const fitH = Math.max(1, Math.round(svg.vh * unit))
-  const innerW = fitW + 2 * pad
-  const innerH = fitH + 2 * pad
-  const pxW = cell ? Math.ceil(innerW / cell.w) * cell.w : innerW
-  const pxH = cell ? Math.ceil(innerH / cell.h) * cell.h : innerH
-  const layout: Layout = {
-    cols: 0,
-    rows: 0,
-    fitW,
-    fitH,
-    pxW,
-    pxH,
-    left: pad,
-    top: pad + Math.floor((pxH - innerH) / 2),
-    cardX: 0,
-  }
-  if (layout.pxW > MAX_SIDE || layout.pxH > MAX_SIDE || layout.pxW * layout.pxH > MAX_PIXELS) {
-    throw new Fail(`image would be ${layout.pxW}x${layout.pxH} pixels, too large`)
-  }
-  const o = { svg: svg.svg, layout, bg, cacheDir: defaultCacheDir() }
+// Rasterizes the canvas and returns the path, or copies it to `out`.
+function toPng(o: RasterOptions, out: string | undefined): string {
   sweepDaily(o.cacheDir)
   const hit = lookup(o)
   const path = hit.state === 'hit' ? hit.path : hit.state === 'miss' ? render(o) : null
@@ -158,22 +104,17 @@ async function main(argv: string[]): Promise<string> {
   }
   if (cmd === 'tex') {
     if (values.display && values.inline) throw new Fail('--display and --inline conflict', 2)
-    const tex = (rest.length ? rest.join(' ') : readStdin()).trim()
-    if (!tex) throw new Fail('no LaTeX given', 2)
-    const emPx = num('--em-px', values['em-px'], DEFAULT_EM_PX)
-    if (emPx === 0) throw new Fail('--em-px must be positive', 2)
-    const cell = parseCell(values.cell)
-    const color = hex('--color', values.color, DEFAULT_MATH)!
-    const bg = hex('--background', values.background, null)
-    const clean = mathToSvg(tex, color, !values.inline)
-    if (!clean) throw new Fail('could not typeset that LaTeX')
-    const unit = emPx / 1000
-    return toPng(clean, unit, pad, bg, values.output, cell)
+    const tex = rest.length ? rest.join(' ') : readStdin()
+    const o = texCanvas(
+      { tex, display: !values.inline, color: values.color, background: values.background, emPx: num('--em-px', values['em-px'], DEFAULT_EM_PX), cell: values.cell, scale, padding: num('--padding', values.padding, 0) },
+      defaultCacheDir(),
+    )
+    return toPng(o, values.output)
   }
   if (cmd === 'svg') {
     const clean = sanitizeSvg(readStdin())
     if (!clean) throw new Fail('not a usable SVG (missing <svg>, or over 200 KB)')
-    return toPng(clean, scale, pad, hex('--background', values.background, null), values.output)
+    return toPng(canvas(clean, scale, pad, hex('--background', values.background, null), defaultCacheDir()), values.output)
   }
   if (cmd === 'mermaid') {
     const card = hex('--card', values.card, '#1e1e2e')!
@@ -186,7 +127,13 @@ async function main(argv: string[]): Promise<string> {
     if (r.state === 'timeout') throw new Fail(`Mermaid diagram took longer than ${MERMAID_TIMEOUT_MS / 1000} s to lay out`)
     if (r.state === 'missing') throw new Fail('the Mermaid bundle is missing (run npm run build)')
     if (r.state !== 'ok') throw new Fail('unsupported or invalid Mermaid diagram')
-    return toPng(r.svg, scale, pad, card, values.output)
+    return toPng(canvas(r.svg, scale, pad, card, defaultCacheDir()), values.output)
+  }
+  if (cmd === 'serve') {
+    // AR_TERM_RENDER_IDLE_MS shortens the idle exit, for tests.
+    const idleMs = Number(process.env.AR_TERM_RENDER_IDLE_MS)
+    await serve(process.stdin, process.stdout, { cacheDir: defaultCacheDir(), idleMs: idleMs > 0 ? idleMs : undefined })
+    return ''
   }
   throw new Fail(cmd ? `unknown command ${cmd}` : 'no command given', 2)
 }

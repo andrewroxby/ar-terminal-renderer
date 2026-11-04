@@ -11,14 +11,14 @@
 -- wider than the window), ar_term_render.art draws Unicode text with cellmath,
 -- as Pi and Claude Code do.
 --
--- One process per expression, rows cached by expression, and placement
--- identical for both renderers because image rows are just strings of
--- placeholder cells.
+-- Rows are cached by expression, and placement is identical for both
+-- renderers because image rows are just strings of placeholder cells.
 
 local api = vim.api
 local art = require("ar_term_render.art")
 local image = require("ar_term_render.image")
 local scan = require("ar_term_render.scan")
+local server = require("ar_term_render.server")
 local terminal = require("ar_term_render.terminal")
 
 local M = {}
@@ -53,6 +53,9 @@ local defaults = {
   ar_term_render = "ar-term-render",
   node = "node",
   cellmath = "cellmath",
+  -- Keep one renderer process for all formulas (it exits after ten idle
+  -- minutes and restarts on demand); false runs the renderer once per formula.
+  persistent = true,
   -- Cell size in pixels when the tty reports none.
   fallback_cell = { w = 9, h = 20 },
 }
@@ -662,7 +665,9 @@ function M.setup(opts)
     display_em = M.config.display_em,
     display_em_floor = M.config.display_em_floor,
     inline_em = M.config.inline_em,
+    persistent = M.config.persistent,
   })
+  image.prefetch()
   cache = {}
 
   api.nvim_create_autocmd("FileType", {
@@ -752,6 +757,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       image.delete_all()
+      server.stop()
     end,
   })
   api.nvim_create_user_command("ArRender", command, {

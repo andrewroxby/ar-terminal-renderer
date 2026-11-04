@@ -10,7 +10,8 @@
     "test:nvim": "make -C nvim test",
     "test:core": "node --test 'core/**/*.test.ts' 'pi/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json",
-    "build": "esbuild core/vendor-src/mathjax.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mathjax.cjs --log-level=warning && esbuild core/vendor-src/mermaid-worker.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mermaid-worker.cjs --log-level=warning"
+    "build": "esbuild core/vendor-src/mathjax.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mathjax.cjs --log-level=warning && esbuild core/vendor-src/mermaid-worker.ts --bundle --format=cjs --platform=node --minify --legal-comments=none --outfile=core/vendor/mermaid-worker.cjs --log-level=warning",
+    "bench": "node bench/transform.ts && node bench/nvim.ts && node bench/load.ts && node bench/pi.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

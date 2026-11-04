@@ -13,6 +13,7 @@
   },
   "include": [
     "core",
-    "pi"
+    "pi",
+    "bench"
   ]
 }

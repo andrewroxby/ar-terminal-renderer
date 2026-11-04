@@ -565,3 +565,173 @@ test('indent: a list item keeps its own indent and adds the math indent', opts, 
   done()
   flush.done()
 })
+
+test('a finished message is kept by its text: same rows, no second send, resent after redraw', opts, () => {
+  const { r, writes, done } = setup()
+  const md = `a\n${fence('Box')}\nb`
+  const first = r.transform(md, { width: 80 })
+  assert.equal(r.status().messages, 1)
+  assert.equal(r.transform(md, { width: 80 }), first)
+  assert.equal(writes.length, 1)
+  // A memo hit still resends what the terminal lost.
+  r.redraw()
+  assert.equal(writes.length, 2)
+  assert.equal(r.transform(md, { width: 80 }), first)
+  assert.equal(writes.length, 2)
+  r.forget()
+  assert.equal(r.status().messages, 0)
+  done()
+})
+
+test('a kept message follows what its rows depend on: width, card and text colour', opts, () => {
+  let card = '#1e1e2e'
+  let text = '#d4d4d4'
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { card: () => card, mathColor: () => text })
+  const md = `${fence('Box')}\n\n$$\nx^2\n$$`
+  const a = r.transform(md, { width: 80 })
+  assert.equal(r.transform(md, { width: 80 }), a)
+  const narrow = r.transform(md, { width: 40 })
+  assert.notEqual(narrow, a, 'a narrower width lays out again')
+  assert.equal(r.transform(md, { width: 40 }), narrow)
+  card = '#223344'
+  const recard = r.transform(md, { width: 40 })
+  assert.notEqual(recard, narrow)
+  text = '#aabbcc'
+  assert.notEqual(r.transform(md, { width: 40 }), recard)
+  assert.equal(r.status().messages, 1, 'one entry per text')
+  done()
+})
+
+test('a growing message and one still waiting on a render are not kept', opts, async () => {
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, {})
+  const md = fence('Box')
+  r.transform(md, { width: 80, streaming: true })
+  assert.equal(r.status().messages, 0)
+  r.transform(md, { width: 80, streaming: false })
+  assert.equal(r.status().messages, 1)
+  r.forget()
+
+  const slow = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: -1 })
+  assert.match(slow.r.transform(fence('Later'), { width: 80 }), /\[figure: Later\]/)
+  assert.equal(slow.r.status().messages, 0)
+  await slow.r.idle()
+  assert.equal(rowsOf(slow.r.transform(fence('Later'), { width: 80 })).length > 0, true)
+  assert.equal(slow.r.status().messages, 1)
+  slow.r.forget()
+  slow.done()
+  done()
+})
+
+test('a message with a PNG line is not kept, so a rewritten file shows again', opts, () => {
+  const { r, dir, done } = setup()
+  const png = (w: number) => {
+    const b = Buffer.alloc(100)
+    b.write('\x89PNG\r\n\x1a\n', 0, 'latin1')
+    b.writeUInt32BE(w, 16)
+    b.writeUInt32BE(10, 20)
+    return b
+  }
+  const path = join(dir, 'p.png')
+  writeFileSync(path, png(30))
+  const md = `![p](${path})`
+  r.transform(md, { width: 80 })
+  assert.equal(r.status().messages, 0)
+  done()
+})
+
+test('sync work stays in the budget: later figures wait for the background', opts, async () => {
+  let t = 0
+  // Every clock read costs 120 ms, so each sync step spends exactly that.
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: 400, now: () => (t += 120) })
+  const md = ['A', 'B', 'C'].map(fence).join('\n\n')
+  const out = r.transform(md, { width: 80 })
+  assert.match(out, /\[figure: B\]/)
+  assert.match(out, /\[figure: C\]/)
+  assert.doesNotMatch(out, /\[figure: A\]/)
+  assert.ok(rowsOf(out).length >= 2)
+  await r.idle()
+  r.forget()
+  done()
+})
+
+test('a diagram laid out by an earlier process is drawn at once, without the worker', opts, async () => {
+  const w = when()
+  const first = setup({ AR_TERM_RENDER_IMAGES: '1' }, { onReady: w.ready })
+  const md = `x\n${FLOW}\ny`
+  first.r.transform(md, { width: 80 })
+  await w.wait
+  const drawn = first.r.transform(md, { width: 80 })
+  first.r.forget()
+
+  const second = new Renderer({ write: () => {}, env: { AR_TERM_RENDER_IMAGES: '1' }, run: () => null, cacheDir: first.r.cacheDir })
+  const again = second.transform(md, { width: 80 })
+  assert.ok(!again.includes('mermaid'))
+  assert.equal(rowsOf(again).length, rowsOf(drawn).length)
+  assert.equal(second.pending(), false)
+  second.forget()
+  first.done()
+})
+
+test('math drawn by an earlier process comes back identical', opts, () => {
+  const a = setup()
+  const md = '$$\n\\frac{a}{b} + c^2\n$$'
+  const out = a.r.transform(md, { width: 80 })
+  const b = new Renderer({ write: () => {}, env: { AR_TERM_RENDER_IMAGES: '1' }, run: () => null, cacheDir: a.r.cacheDir })
+  assert.equal(b.transform(md, { width: 80 }).split('\n').length, out.split('\n').length)
+  assert.ok(readdirSync(a.r.cacheDir).some((f) => f.startsWith('s-') && f.endsWith('.json')))
+  a.done()
+})
+
+test('graphics detection: first answer is direct, later ones refresh in the background', async () => {
+  let clock = 0
+  let viewer = 'graphics=file'
+  const sync: string[] = []
+  const bg: string[] = []
+  let ready = 0
+  const answer = (args: string[]) => (args.includes('@viewer') ? viewer : args.some((a) => a.includes('cell_width')) ? '9 20' : '')
+  const { r, done } = setup(
+    { TMUX: '/tmp/x,1,0' },
+    {
+      now: () => clock,
+      onReady: () => ready++,
+      run: (_c, a) => (sync.push(a[0]!), answer(a)),
+      runAsync: async (_c, a) => (bg.push(a[0]!), answer(a)),
+    },
+  )
+  assert.equal(r.available().ok, true)
+  assert.deepEqual(r.cell(), { w: 9, h: 20 })
+  const direct = sync.length
+  assert.ok(direct > 0 && bg.length === 0)
+
+  // Past the memo: the old answer comes back, nothing blocks, a fresh one lands.
+  clock += 3000
+  viewer = 'transport=none graphics=no'
+  assert.equal(r.available().ok, true)
+  assert.equal(sync.length, direct)
+  await new Promise((res) => setTimeout(res, 0))
+  assert.ok(bg.length > 0)
+  assert.equal(r.available().ok, false)
+  assert.equal(ready, 1, 'the host is asked to rebuild when the answer changes')
+
+  // An unchanged answer says nothing.
+  clock += 3000
+  r.available()
+  await new Promise((res) => setTimeout(res, 0))
+  assert.equal(ready, 1)
+
+  // recheck() is the direct way.
+  viewer = 'graphics=inline'
+  assert.equal(r.recheck().ok, true)
+  done()
+})
+
+test('prime() looks up graphics and the cell without a blocking command', async () => {
+  const sync: string[] = []
+  const { r, done } = setup({ TMUX: '/tmp/x,1,0' }, { run: (_c, a) => (sync.push(a[0]!), null), runAsync: async (_c, a) => (a.includes('@viewer') ? 'graphics=file' : '9 20') })
+  r.prime()
+  await new Promise((res) => setTimeout(res, 5))
+  assert.equal(r.available().ok, true)
+  assert.deepEqual(r.cell(), { w: 9, h: 20 })
+  assert.deepEqual(sync, [])
+  done()
+})

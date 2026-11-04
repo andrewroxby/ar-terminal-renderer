@@ -10,13 +10,15 @@ local M = {}
 local defaults = {
   -- Cell size when the ioctl probe fails; Ghostty at RobotoMono 15.
   cell = { w = 9, h = 20 },
+  -- How long a graphics answer is kept before it is looked up again.
+  memo_ms = 2000,
 }
 
 local config = vim.deepcopy(defaults)
 
 --- Replaces the options with the defaults plus `opts`, so calling it again
 --- starts from scratch.
---- @param opts table|nil { cell = { w, h } }
+--- @param opts table|nil { cell = { w, h }, memo_ms = number }
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
   M.invalidate_cell()
@@ -138,10 +140,8 @@ function M.detect(env, run)
   return { ok = ok, reason = ok and "kitty-graphics terminal" or "terminal not recognized" }
 end
 
--- The answer is remembered for this long, so a viewer that changes is picked
--- up within seconds, as in Pi.
-local MEMO_MS = 2000
 local memo = nil
+local refreshing = false
 
 local function now_ms()
   return uv.hrtime() / 1e6
@@ -151,15 +151,51 @@ function M.invalidate()
   memo = nil
 end
 
+-- `detect` again with commands that wait on the event loop instead of
+-- blocking it, so a tmux that answers slowly cannot stall the editor. The
+-- detection reads like straight-line code; each command yields until its
+-- answer arrives.
+local function refresh_async()
+  if refreshing then
+    return
+  end
+  refreshing = true
+  local co
+  local function run(cmd, args)
+    local ok = pcall(vim.system, vim.list_extend({ cmd }, args), { text = true }, function(res)
+      vim.schedule(function()
+        coroutine.resume(co, res.code == 0 and res.stdout and vim.trim(res.stdout) or nil)
+      end)
+    end)
+    if not ok then
+      return nil
+    end
+    return coroutine.yield()
+  end
+  co = coroutine.create(function()
+    local ok, res = pcall(M.detect, vim.env, run)
+    refreshing = false
+    if ok and memo then
+      memo = { at = now_ms(), v = res.ok }
+    end
+  end)
+  coroutine.resume(co)
+end
+
 --- Whether to draw images now. Placeholder cells carry the image id in a
 --- 24-bit foreground colour, which a terminal only gets with termguicolors.
+--- The first answer comes straight from the environment and tmux. After
+--- memo_ms the old answer is returned at once while a fresh one is fetched in
+--- the background.
 function M.graphics()
   if not vim.o.termguicolors then
     return false
   end
   local t = now_ms()
-  if not memo or t - memo.at > MEMO_MS then
+  if not memo then
     memo = { at = t, v = M.detect(vim.env, default_run).ok }
+  elseif t - memo.at > config.memo_ms then
+    refresh_async()
   end
   return memo.v
 end

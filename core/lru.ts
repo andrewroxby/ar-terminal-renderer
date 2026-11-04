@@ -37,6 +37,16 @@ export class Lru<K, V> {
     }
   }
 
+  // Drops the least recently used entry. False when there is none.
+  dropOldest(): boolean {
+    const first = this.m.entries().next()
+    if (first.done) return false
+    const [k, v] = first.value
+    this.m.delete(k)
+    this.onEvict?.(k, v)
+    return true
+  }
+
   values(): V[] {
     return [...this.m.values()]
   }

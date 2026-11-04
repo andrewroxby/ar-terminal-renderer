@@ -28,6 +28,7 @@ local api = vim.api
 local uv = vim.uv
 local lock = require("ar_term_render.lock")
 local queue = require("ar_term_render.queue")
+local server = require("ar_term_render.server")
 local terminal = require("ar_term_render.terminal")
 
 local M = {}
@@ -50,6 +51,10 @@ local defaults = {
   inline_em = 0.7,
   -- Shrink passes allowed before giving up.
   max_passes = 4,
+  -- Keep one `ar-term-render serve` process for all formulas instead of
+  -- starting the renderer once per formula. A renderer without `serve` falls
+  -- back to one run per formula by itself.
+  persistent = true,
 }
 
 local config = vim.deepcopy(defaults)
@@ -64,6 +69,7 @@ function M.setup(opts)
   config = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
   warned = {}
   node_checked = {}
+  server.reset()
 end
 
 -- Em sizes move in steps of this many device pixels.
@@ -345,24 +351,46 @@ local function warn_once(key, message)
   end
 end
 
+-- Records whether `node` can run the renderer, from the answer to
+-- `node --version` (res is nil when it could not be run).
+local function record_node(node, res)
+  local major, minor = ((res and res.code == 0 and res.stdout) or ""):match("v(%d+)%.(%d+)")
+  if not major then
+    warn_once("node", "node did not answer --version; the renderer needs " .. NODE_NEEDS)
+    node_checked[node] = false
+  elseif not node_supported(tonumber(major), tonumber(minor)) then
+    warn_once("node", string.format("the renderer needs %s, found %s", NODE_NEEDS, vim.trim(res.stdout)))
+    node_checked[node] = false
+  else
+    node_checked[node] = true
+  end
+end
+
 -- Checks the node that will run the renderer, once per binary.
 local function node_ok(node)
   if node_checked[node] == nil then
     local ok, res = pcall(function()
       return vim.system({ node, "--version" }, { text = true }):wait(2000)
     end)
-    local major, minor = ((ok and res.code == 0 and res.stdout) or ""):match("v(%d+)%.(%d+)")
-    if not major then
-      warn_once("node", "node did not answer --version; the renderer needs " .. NODE_NEEDS)
-      node_checked[node] = false
-    elseif not node_supported(tonumber(major), tonumber(minor)) then
-      warn_once("node", string.format("the renderer needs %s, found %s", NODE_NEEDS, vim.trim(res.stdout)))
-      node_checked[node] = false
-    else
-      node_checked[node] = true
-    end
+    record_node(node, ok and res or nil)
   end
   return node_checked[node]
+end
+
+--- Starts the node check in the background, so the first formula does not
+--- wait the ~40 ms it takes.
+function M.prefetch()
+  local node = config.node
+  if node_checked[node] ~= nil then
+    return
+  end
+  pcall(vim.system, { node, "--version" }, { text = true }, function(res)
+    vim.schedule(function()
+      if node_checked[node] == nil then
+        record_node(node, res)
+      end
+    end)
+  end)
 end
 
 --- The argv prefix that runs ar-term-render, or nil when it is missing or
@@ -436,35 +464,70 @@ local function png(bin, expr, display, em, color, cell, cb)
     return
   end
   queue.submit("png:" .. key, function(done)
-    local cmd = vim.list_extend(vim.deepcopy(bin), {
-      "tex",
-      display and "--display" or "--inline",
-      "--em-px", string.format("%.1f", em),
-      "--cell", cell.w .. "x" .. cell.h,
-    })
-    if color then
-      vim.list_extend(cmd, { "-c", color })
+    local function finish(out)
+      if out and uv.fs_stat(out) then
+        paths[key] = out
+        done(out)
+        return true
+      end
+      return false
     end
-    vim.list_extend(cmd, { "--", expr })
-    local started = pcall(vim.system, cmd, { text = true }, function(res)
-      vim.schedule(function()
-        local out = vim.trim(res.stdout or "")
-        if res.code == 0 and (res.signal or 0) == 0 and out ~= "" and uv.fs_stat(out) then
-          paths[key] = out
-          done(out)
-        elseif rejected(res) then
-          paths[key] = false
-          done(nil)
-        else
-          local line = vim.trim((res.stderr or ""):match("[^\n]*") or "")
-          warn_once("failed", string.format("the renderer failed (%s); it needs %s and rsvg-convert", line ~= "" and line or "exit " .. tostring(res.code), NODE_NEEDS))
-          done(nil, true)
-        end
+
+    -- One renderer run per formula: the way without a server.
+    local function one_shot()
+      local cmd = vim.list_extend(vim.deepcopy(bin), {
+        "tex",
+        display and "--display" or "--inline",
+        "--em-px", string.format("%.1f", em),
+        "--cell", cell.w .. "x" .. cell.h,
+      })
+      if color then
+        vim.list_extend(cmd, { "-c", color })
+      end
+      vim.list_extend(cmd, { "--", expr })
+      local started = pcall(vim.system, cmd, { text = true }, function(res)
+        vim.schedule(function()
+          local out = vim.trim(res.stdout or "")
+          if res.code == 0 and (res.signal or 0) == 0 and out ~= "" and finish(out) then
+            return
+          elseif rejected(res) then
+            paths[key] = false
+            done(nil)
+          else
+            local line = vim.trim((res.stderr or ""):match("[^\n]*") or "")
+            warn_once("failed", string.format("the renderer failed (%s); it needs %s and rsvg-convert", line ~= "" and line or "exit " .. tostring(res.code), NODE_NEEDS))
+            done(nil, true)
+          end
+        end)
       end)
-    end)
-    if not started then
-      done(nil, true)
+      if not started then
+        done(nil, true)
+      end
     end
+
+    if not config.persistent then
+      one_shot()
+      return
+    end
+    server.request(bin, {
+      tex = expr,
+      display = display,
+      emPx = tonumber(string.format("%.1f", em)),
+      cell = cell.w .. "x" .. cell.h,
+      color = color,
+    }, function(res)
+      if res.unavailable then
+        one_shot()
+      elseif res.path and finish(res.path) then
+        return
+      elseif res.rejected then
+        paths[key] = false
+        done(nil)
+      else
+        warn_once("failed", string.format("the renderer failed (%s); it needs %s and rsvg-convert", res.error or "no answer", NODE_NEEDS))
+        done(nil, true)
+      end
+    end)
   end, cb)
 end
 

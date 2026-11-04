@@ -66,7 +66,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
     })
 
   pi.registerMarkdownTransformer((markdown, ctx) =>
-    ctx.messageType === 'assistant' ? renderer.transform(markdown, { width: ctx.availableWidth }) : markdown,
+    ctx.messageType === 'assistant' ? renderer.transform(markdown, { width: ctx.availableWidth, streaming: ctx.isStreaming }) : markdown,
   )
 
   // The guidance line is decided once per session, at the first turn, so the
@@ -75,7 +75,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
   let line: string | null | undefined
   pi.on('before_agent_start', (event, ctx) => {
     theme = ctx.ui.theme
-    line ??= renderer.enabled && renderer.available().ok ? guidance((deps.mermaidAvailable ?? mermaidAvailable)()) : null
+    line ??= renderer.enabled && renderer.recheck().ok ? guidance((deps.mermaidAvailable ?? mermaidAvailable)()) : null
     return line ? { systemPrompt: `${event.systemPrompt}\n\n${line}` } : undefined
   })
 
@@ -115,6 +115,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
     theme = ctx.ui.theme
     line = undefined
     stopped = false
+    renderer.prime()
     // An empty widget is the only way to get at the TUI for rebuilds.
     ctx.ui.setWidget?.('ar-term-render', (handle) => {
       tui = handle

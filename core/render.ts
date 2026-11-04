@@ -6,15 +6,16 @@
 import { createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { DEFAULT_CARD, DEFAULT_MATH } from './color.ts'
-import { defaultRun, detectGraphics, indentFromEnv, tmuxCell, type Availability, type Run } from './env.ts'
+import { defaultRun, defaultRunAsync, detectGraphics, detectGraphicsAsync, indentFromEnv, tmuxCell, tmuxCellAsync, type Availability, type Run, type RunAsync } from './env.ts'
 import { DEFAULT_CELL, layout as computeLayout, layoutMath, type Cell, type Layout } from './layout.ts'
 import { mathToSvg } from './math.ts'
-import { MermaidRunner, mermaidAvailable, refuseMermaid } from './mermaid.ts'
+import { MermaidRunner, mermaidAvailable, mermaidStamp, refuseMermaid } from './mermaid.ts'
 import { placeholderRows, transmit, transmitFile } from './kitty.ts'
 import { tryLock } from './lock.ts'
 import { Lru } from './lru.ts'
-import { defaultCacheDir, lookup, marked, mark, render as rasterize, renderAsync, sweep, type RasterOptions } from './raster.ts'
+import { defaultCacheDir, lookup, marked, mark, render as rasterize, renderAsync, sweepDaily, type RasterOptions } from './raster.ts'
 import { scan, type Block } from './scan.ts'
+import { srcGet, srcKey, srcPut } from './srccache.ts'
 import { sanitizeSvg } from './svg.ts'
 
 export const MAX_FIGURES = 3
@@ -22,14 +23,33 @@ export const MAX_MATH = 12
 const MAX_PNG_BYTES = 10 * 1024 * 1024
 const MAX_PNG_PIXELS = 16_000_000
 const RASTER_BUDGET_MS = 300
+// Sync rendering stays within the budget: no new render starts with less than
+// this much of it left, and a started one is cut off at what remains. The
+// budget refills after this long without sync work, so a burst of messages
+// (a resumed transcript) shares one budget instead of each taking its own.
+const MIN_SYNC_MS = 100
+const BUDGET_WINDOW_MS = 500
 const MEMO_TTL_MS = 2000
 const MAX_RESEND = 30
-const LRU_CAP = 128
+// Figures and per-block results outlive a long transcript's worth of blocks,
+// so a rebuild finds them instead of converting them again.
+const FIGURE_CAP = 512
+const SOURCE_CAP = 256
+// Whole transformed messages, by text, up to this many characters in all.
+const MSG_CAP = 128
+const MSG_CHARS = 4_000_000
+// Background renders run this many at a time.
+const BG_PARALLEL = 3
+// A host rebuild for finished background renders waits at least this long
+// after the previous one, except at the end of a batch.
+const READY_GAP_MS = 400
 
 export interface Options {
   write: (data: string) => void
   env?: NodeJS.ProcessEnv
   run?: Run
+  // Runs a command without blocking, for refreshing what `run` found.
+  runAsync?: RunAsync
   cacheDir?: string
   cellFallback?: () => Cell | undefined
   card?: () => string
@@ -51,6 +71,15 @@ interface Drawn {
   cols: number
   rows: number
   lines: string[]
+}
+
+// A transformed message whose figures are all drawn. `ctx` holds what the
+// output depends on besides the text.
+interface Done {
+  ctx: string
+  out: string
+  drawn: Drawn[]
+  chars: number
 }
 
 interface Source {
@@ -95,22 +124,29 @@ export class Renderer {
   private mermaid = new MermaidRunner()
   private env: NodeJS.ProcessEnv
   private run: Run
+  private refreshing = false
   private indent: { figure: number; math: number }
   private now: () => number
   private langs: Set<string>
   private sent = new Set<number>()
   // Figures by (png path, cols, rows). Width changes that leave the layout
   // alone land on the same entry, so they neither re-id nor re-send.
-  private figures = new Lru<string, Drawn>(LRU_CAP, (_k, d) => this.sent.delete(d.id))
-  private memo = new Lru<string, Drawn | null>(LRU_CAP)
-  private sources = new Lru<string, Source | null>(LRU_CAP)
+  private figures = new Lru<string, Drawn>(FIGURE_CAP, (_k, d) => this.sent.delete(d.id))
+  private memo = new Lru<string, Drawn | null>(FIGURE_CAP)
+  private sources = new Lru<string, Source | null>(SOURCE_CAP)
+  private done = new Lru<string, Done>(MSG_CAP, (_k, d) => (this.doneChars -= d.chars))
+  private doneChars = 0
   private availMemo: { at: number; v: Availability } | null = null
   private cellMemo: { at: number; v: Cell } | null = null
   private nextId: number
   private spent = 0
+  private spentAt = 0
   private queue: { key: string; run: () => Promise<boolean> }[] = []
   private queued = new Set<string>()
   private draining = false
+  private active = 0
+  private ready = false
+  private readyAt = 0
   private idleWaiters: (() => void)[] = []
   private unsent = new Map<number, Drawn>()
   // Set by the first transmit in a pass that finds the lock held, so the
@@ -129,44 +165,95 @@ export class Renderer {
     // Random 24-bit base per process, so two processes in one terminal don't
     // overwrite each other's images. Never 0.
     this.nextId = Math.floor(Math.random() * 0xfffffe)
-    sweep(this.cacheDir)
+    sweepDaily(this.cacheDir)
   }
 
+  // What the terminal can do, and its cell size, are found with a command
+  // (tmux) the first time they are asked for. After MEMO_TTL_MS the old answer
+  // is still returned at once while a fresh one is fetched without blocking;
+  // onReady fires if it changed.
   available(): Availability {
     const t = this.now()
-    if (!this.availMemo || t - this.availMemo.at > MEMO_TTL_MS) {
-      this.availMemo = { at: t, v: detectGraphics(this.env, this.run) }
-    }
+    if (!this.availMemo) this.availMemo = { at: t, v: detectGraphics(this.env, this.run) }
+    else if (t - this.availMemo.at > MEMO_TTL_MS) this.refresh()
     return this.availMemo.v
   }
 
   cell(): Cell {
     const t = this.now()
-    if (!this.cellMemo || t - this.cellMemo.at > MEMO_TTL_MS) {
-      const v = (this.env.TMUX ? tmuxCell(this.run) : null) ?? this.o.cellFallback?.() ?? DEFAULT_CELL
-      this.cellMemo = { at: t, v: v.w > 0 && v.h > 0 ? v : DEFAULT_CELL }
-    }
+    if (!this.cellMemo) this.cellMemo = { at: t, v: this.usableCell(this.env.TMUX ? tmuxCell(this.run) : null) }
+    else if (t - this.cellMemo.at > MEMO_TTL_MS) this.refresh()
     return this.cellMemo.v
   }
 
-  transform(markdown: string, ctx: { width: number }): string {
+  // Looks at the terminal again now, for a decision that should not rest on
+  // an answer up to MEMO_TTL_MS old.
+  recheck(): Availability {
+    this.availMemo = null
+    return this.available()
+  }
+
+  // Looks both up in the background so the first transform need not wait.
+  prime(): void {
+    if (!this.availMemo || !this.cellMemo) this.refresh()
+  }
+
+  private usableCell(found: Cell | null): Cell {
+    const v = found ?? this.o.cellFallback?.() ?? DEFAULT_CELL
+    return v.w > 0 && v.h > 0 ? v : DEFAULT_CELL
+  }
+
+  private refresh(): void {
+    if (this.refreshing) return
+    this.refreshing = true
+    const o = this.o
+    const run: RunAsync = o.runAsync ?? (o.run ? async (c, a) => o.run!(c, a) : defaultRunAsync)
+    void Promise.all([detectGraphicsAsync(this.env, run), this.env.TMUX ? tmuxCellAsync(run) : null])
+      .then(([a, c]) => {
+        const t = this.now()
+        const cell = this.usableCell(c)
+        const was = [this.availMemo?.v, this.cellMemo?.v] as const
+        this.availMemo = { at: t, v: a }
+        this.cellMemo = { at: t, v: cell }
+        const same = was[0] && was[1] && was[0].ok === a.ok && was[0].mode === a.mode && was[1].w === cell.w && was[1].h === cell.h
+        if (!same && was[0]) o.onReady?.()
+      })
+      .catch(() => {})
+      .finally(() => (this.refreshing = false))
+  }
+
+  // `streaming` marks a message that is still growing: each of its texts is
+  // seen once, so none is kept.
+  transform(markdown: string, ctx: { width: number; streaming?: boolean }): string {
     if (!this.enabled) return markdown
     if (!/```|~~~|!\[|\$\$|\\\[/.test(markdown)) return markdown
+
+    // Pi transforms again on every rebuild, and a transcript holds the same
+    // text many times over, so a finished message is kept by its text.
+    const done = this.done.get(markdown)
+    if (done && done.ctx === this.context(ctx.width)) {
+      for (const d of done.drawn) this.touch(d)
+      return done.out
+    }
+
     const blocks = scan(markdown, this.langs)
     if (blocks.length === 0) return markdown
 
-    this.spent = 0
+    // The budget refills after a quiet spell, not on every call.
+    if (this.now() - this.spentAt > BUDGET_WINDOW_MS) this.spent = 0
     this.lockMissed = false
     const draw = this.available().ok
     // Draw in document order so the raster budget goes to the first figures.
     let figures = 0
     let maths = 0
+    let waiting = false
     const drawn = blocks.map((b) => {
       if (!draw) return null
       // A list item's indent is about what its marker takes from the width.
       const width = Math.max(4, ctx.width - b.indent.length)
-      if (b.kind === 'math') return maths++ < MAX_MATH ? this.draw(b, width) : null
-      return figures++ < MAX_FIGURES ? this.draw(b, width) : null
+      const d = b.kind === 'math' ? (maths++ < MAX_MATH ? this.draw(b, width) : null) : figures++ < MAX_FIGURES ? this.draw(b, width) : null
+      if (d === PENDING) waiting = true
+      return d
     })
     let out = markdown
     for (let i = blocks.length - 1; i >= 0; i--) {
@@ -181,6 +268,12 @@ export class Renderer {
       const before = prevLineNonBlank(markdown, b.start) ? pad + '\n' : ''
       const after = nextLineNonBlank(markdown, b.end) ? '\n' + pad : ''
       out = out.slice(0, b.start) + before + indented(text, pad) + after + out.slice(b.end)
+    }
+    // Not kept: a message still waiting on a render or a transmit, and one
+    // with a PNG line, whose file can change under the same text.
+    if (!ctx.streaming && !waiting && this.unsent.size === 0 && !blocks.some((b) => b.kind === 'image')) {
+      const keep = drawn.filter((d): d is Drawn => d !== null && d !== PENDING)
+      this.remember(markdown, { ctx: this.context(ctx.width), out, drawn: keep, chars: markdown.length + out.length })
     }
     return out
   }
@@ -215,6 +308,8 @@ export class Renderer {
     this.figures.clear()
     this.memo.clear()
     this.sources.clear()
+    this.done.clear()
+    this.doneChars = 0
     this.unsent.clear()
     this.queue = []
     this.queued.clear()
@@ -223,14 +318,37 @@ export class Renderer {
     this.retry = undefined
   }
 
-  status(): { enabled: boolean; available: Availability; cell: Cell; images: number; cacheDir: string } {
+  status(): { enabled: boolean; available: Availability; cell: Cell; images: number; messages: number; cacheDir: string } {
     return {
       enabled: this.enabled,
       available: this.available(),
       cell: this.cell(),
       images: this.figures.size,
+      messages: this.done.size,
       cacheDir: this.cacheDir,
     }
+  }
+
+  // What a transformed message depends on besides its text.
+  private context(width: number): string {
+    const a = this.available()
+    const c = this.cell()
+    return `${width}|${a.ok}|${a.mode ?? ''}|${c.w}x${c.h}|${this.o.card?.() ?? DEFAULT_CARD}|${this.o.mathColor?.() ?? DEFAULT_MATH}`
+  }
+
+  private remember(text: string, d: Done): void {
+    if (d.chars > MSG_CHARS / 4) return
+    const old = this.done.get(text)
+    if (old) this.doneChars -= old.chars
+    this.done.set(text, d)
+    this.doneChars += d.chars
+    while (this.doneChars > MSG_CHARS && this.done.dropOldest()) {}
+  }
+
+  // Marks a figure in use again and makes sure its image is in the terminal.
+  private touch(d: Drawn): void {
+    this.figures.set(figKey(d.png, d.cols, d.rows), d)
+    this.send(d)
   }
 
   // What replaces a block that is not drawn. null leaves the original
@@ -263,7 +381,7 @@ export class Renderer {
       key = `${skey}|${width}|${cell.w}x${cell.h}|${indent}`
       if (b.kind === 'math') {
         make = () => {
-          const m = mathToSvg(b.body, mathColor)
+          const m = mathToSvg(b.body, mathColor, true, this.cacheDir)
           return m ? { svg: m.svg, vw: m.vw, vh: m.vh, style: 'math', maxScale: 1 } : null
         }
       } else if (kind!.toSvg) {
@@ -273,14 +391,19 @@ export class Renderer {
         }
       } else {
         // Refusals are decided at once and remembered, in memory and on disk.
-        if (this.sources.get(skey) === undefined && (refuseMermaid(b.body) || !mermaidAvailable() || marked(this.cacheDir, skey))) {
-          this.sources.set(skey, null)
+        // So are layouts: a diagram an earlier process drew skips the worker.
+        const layoutKey = srcKey('mermaid', mermaidStamp(), card, b.body)
+        if (this.sources.get(skey) === undefined) {
+          const hit = srcGet(this.cacheDir, layoutKey)
+          if (hit) this.sources.set(skey, { svg: hit.svg, vw: hit.vw, vh: hit.vh, style: 'card', maxScale: 2 })
+          else if (refuseMermaid(b.body) || !mermaidAvailable() || marked(this.cacheDir, skey)) this.sources.set(skey, null)
         }
         makeAsync = async () => {
           const r = await this.mermaid.run(b.body, card, this.o.mermaidTimeoutMs)
           if (r.state === 'closed') return undefined
           if (r.state === 'bad' || r.state === 'timeout') mark(this.cacheDir, skey!)
           if (r.state !== 'ok') return null
+          srcPut(this.cacheDir, layoutKey, r.svg)
           return { svg: r.svg.svg, vw: r.svg.vw, vh: r.svg.vh, style: 'card', maxScale: 2 }
         }
       }
@@ -356,9 +479,7 @@ export class Renderer {
         })
         return PENDING
       }
-      const t0 = this.now()
-      src = make()
-      this.spent += this.now() - t0
+      src = this.timed(make)
       if (skey) this.sources.set(skey, src)
     }
     if (!src) {
@@ -373,13 +494,18 @@ export class Renderer {
 
     let hit = lookup(ro)
     if (hit.state === 'miss') {
-      if (this.spent >= this.budget()) {
+      const left = this.budget() - this.spent
+      if (left < MIN_SYNC_MS) {
         this.enqueue(key, async () => (await renderAsync(ro)) !== null)
         return PENDING
       }
-      const t0 = this.now()
-      const path = rasterize(ro)
-      this.spent += this.now() - t0
+      // Cut off at what is left of the budget; a render that needs longer
+      // goes to the background instead of failing.
+      const path = this.timed(() => rasterize(ro, left))
+      if (path === 'slow') {
+        this.enqueue(key, async () => (await renderAsync(ro)) !== null)
+        return PENDING
+      }
       hit = path ? { state: 'hit', path } : { state: 'fail' }
     }
     if (hit.state === 'fail') {
@@ -400,12 +526,20 @@ export class Renderer {
     return this.o.budgetMs ?? RASTER_BUDGET_MS
   }
 
+  // Runs sync work against the budget.
+  private timed<T>(fn: () => T): T {
+    const t0 = this.now()
+    try {
+      return fn()
+    } finally {
+      this.spentAt = this.now()
+      this.spent += this.spentAt - t0
+    }
+  }
+
   private fromMemo(key: string): Drawn | null {
     const hit = this.memo.get(key)!
-    if (hit) {
-      this.figures.set(figKey(hit.png, hit.cols, hit.rows), hit)
-      this.send(hit)
-    }
+    if (hit) this.touch(hit)
     return hit
   }
 
@@ -426,29 +560,56 @@ export class Renderer {
     return this.nextId
   }
 
-  // Figures past the per-render raster budget render later, one at a time,
-  // off the event loop. onReady lets the host rebuild what it drew.
+  // Figures past the per-render raster budget render later, a few at a time,
+  // off the event loop. onReady lets the host rebuild what it drew; it fires
+  // as renders land (not more often than READY_GAP_MS) and once more when the
+  // queue is empty.
   private enqueue(key: string, run: () => Promise<boolean>): void {
     if (this.queued.has(key)) return
     this.queued.add(key)
     this.queue.push({ key, run })
     if (!this.draining) {
       this.draining = true
-      setTimeout(() => void this.drain(), 0).unref()
+      setTimeout(() => this.pump(), 0).unref()
     }
   }
 
-  private async drain(): Promise<void> {
-    let ready = false
-    for (let item = this.queue.shift(); item; item = this.queue.shift()) {
-      try {
-        if (await item.run()) ready = true
-      } catch {}
-      this.queued.delete(item.key)
+  private pump(): void {
+    while (this.active < BG_PARALLEL && this.queue.length > 0) {
+      const item = this.queue.shift()!
+      this.active++
+      item
+        .run()
+        .then(
+          (ok) => {
+            if (ok) this.ready = true
+          },
+          () => {},
+        )
+        .finally(() => {
+          this.queued.delete(item.key)
+          this.active--
+          if (this.queue.length > 0) this.pump()
+          else if (this.active === 0) this.settle()
+          else this.notify(false)
+        })
     }
+    if (this.active === 0 && this.queue.length === 0) this.settle()
+  }
+
+  private settle(): void {
     this.draining = false
     for (const w of this.idleWaiters.splice(0)) w()
-    if (ready) this.o.onReady?.()
+    this.notify(true)
+  }
+
+  private notify(force: boolean): void {
+    if (!this.ready) return
+    const t = Date.now()
+    if (!force && t - this.readyAt < READY_GAP_MS) return
+    this.ready = false
+    this.readyAt = t
+    this.o.onReady?.()
   }
 
   private send(d: Drawn): void {

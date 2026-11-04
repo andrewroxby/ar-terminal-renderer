@@ -177,7 +177,7 @@ describe("failed renderer runs", function()
 
   it("remembers a formula the renderer rejects, and does not run it again", function()
     local bin = helpers.script(dir, "ar", "echo x >> " .. ran .. '\necho "ar-term-render: could not typeset that LaTeX" >&2\nexit 1')
-    image.setup({ ar_bin = bin, node = dir .. "/node" })
+    image.setup({ ar_bin = bin, node = dir .. "/node", persistent = false })
     local img, transient = render([[\frac{1}{]], true, 40)
     assert.is_nil(img)
     assert.is_nil(transient)
@@ -189,7 +189,7 @@ describe("failed renderer runs", function()
 
   it("does not remember a run that failed outright, and warns once about it", function()
     local bin = helpers.script(dir, "ar", "echo x >> " .. ran .. '\necho "SyntaxError: nope" >&2\nexit 1')
-    image.setup({ ar_bin = bin, node = dir .. "/node" })
+    image.setup({ ar_bin = bin, node = dir .. "/node", persistent = false })
     local warnings = {}
     local notify = vim.notify
     vim.notify = function(msg)
@@ -208,7 +208,7 @@ describe("failed renderer runs", function()
 
   it("treats a signal or an odd exit code as a failed run too", function()
     local bin = helpers.script(dir, "ar", "echo x >> " .. ran .. "\nexit 3")
-    image.setup({ ar_bin = bin, node = dir .. "/node" })
+    image.setup({ ar_bin = bin, node = dir .. "/node", persistent = false })
     local notify = vim.notify
     vim.notify = function() end
     local _, transient = render([[x^2]], true, 40)
@@ -307,7 +307,7 @@ if have_cli and have_rsvg then
       local dir = helpers.tmpdir()
       local log = dir .. "/args"
       local bin = helpers.script(dir, "ar", "echo \"$@\" >> " .. log .. "\nexec node " .. script .. ' "$@"')
-      image.setup({ ar_bin = bin })
+      image.setup({ ar_bin = bin, persistent = false })
       -- The cell changes under the renderer, as after a font change.
       local reads = 0
       local cell = terminal.cell

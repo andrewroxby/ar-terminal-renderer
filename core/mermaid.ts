@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { flattenCssVars } from './cssvars.ts'
+import { bundleStamp } from './srccache.ts'
 import { MAX_CONVERTED_BYTES, sanitizeSvg, type CleanSvg } from './svg.ts'
 
 export const MERMAID_TIMEOUT_MS = 2000
@@ -26,6 +27,11 @@ type MermaidResult =
   | { state: 'timeout' }
   | { state: 'missing' }
   | { state: 'closed' }
+
+// Changes when the bundled layout code is rebuilt, for keys that depend on it.
+export function mermaidStamp(): string {
+  return bundleStamp(WORKER_FILE)
+}
 
 export function mermaidAvailable(): boolean {
   return existsSync(WORKER_FILE)

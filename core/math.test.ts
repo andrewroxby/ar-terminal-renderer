@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mathToSvg, normalizeTex } from './math.ts'
 import { layoutMath as layoutMathOrNull, type Cell } from './layout.ts'
@@ -128,4 +131,41 @@ test('\\text{href} draws; converted svg over 300 KB is refused', () => {
   const terms = (n: number) => Array.from({ length: n }, (_v, i) => `x_{${i}}`).join('+')
   assert.ok(mathToSvg(terms(100), '#ddd'))
   assert.equal(mathToSvg(terms(150), '#ddd'), null)
+})
+
+test('with a cache directory, a conversion is stored and read back, refusals too', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-m-'))
+  const a = mathToSvg('\\frac{a}{b} + c^2', '#abcdef', true, dir)!
+  assert.ok(a)
+  const files = readdirSync(dir)
+  assert.equal(files.filter((f) => /^s-.*\.json$/.test(f)).length, 1)
+  assert.deepEqual(mathToSvg('\\frac{a}{b} + c^2', '#abcdef', true, dir), a)
+  // Display and inline, and each colour, are separate conversions.
+  const inline = mathToSvg('\\frac{a}{b} + c^2', '#abcdef', false, dir)!
+  assert.notEqual(inline.svg, a.svg)
+  assert.notDeepEqual(mathToSvg('\\frac{a}{b} + c^2', '#123456', true, dir), a)
+  assert.equal(readdirSync(dir).filter((f) => f.startsWith('s-')).length, 3)
+
+  assert.equal(mathToSvg('\\frac{1}{', '#abcdef', true, dir), null)
+  assert.ok(readdirSync(dir).some((f) => f.startsWith('m-') && f.endsWith('.fail')))
+  assert.equal(mathToSvg('\\frac{1}{', '#abcdef', true, dir), null)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a cached conversion needs no MathJax', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-m-'))
+  const script = (): string => {
+    const r = spawnSync(process.execPath, ['-e', `
+      const { mathToSvg } = await import(${JSON.stringify(fileURLToPath(new URL('./math.ts', import.meta.url)))})
+      const t = performance.now()
+      const m = mathToSvg('x^2+y^2', '#ffffff', true, ${JSON.stringify(dir)})
+      console.log(JSON.stringify({ ok: !!m, ms: performance.now() - t }))
+    `, '--input-type=module'], { encoding: 'utf8' })
+    return r.stdout.trim()
+  }
+  const cold = JSON.parse(script())
+  const warm = JSON.parse(script())
+  assert.ok(cold.ok && warm.ok)
+  assert.ok(warm.ms < cold.ms / 3, `cached ${warm.ms} ms vs ${cold.ms} ms`)
+  rmSync(dir, { recursive: true, force: true })
 })

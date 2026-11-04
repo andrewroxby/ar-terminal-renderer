@@ -87,13 +87,16 @@ test('only assistant messages are transformed', () => {
   h.cleanup()
 })
 
-test('guidance is decided once per session; /render and a new session reset it', () => {
+test('guidance is decided once per session; /render and a new session reset it', async () => {
   const env: NodeJS.ProcessEnv = { AR_TERM_RENDER_IMAGES: '1' }
   const h = harness(env)
   const ask = () => h.fire('before_agent_start', { systemPrompt: 'SYS' })[0]
   const first = ask()
   assert.equal(first.systemPrompt, `SYS\n\n${GUIDANCE}`)
   env.AR_TERM_RENDER_IMAGES = '0' // graphics vanish mid-session
+  // The renderer notices in the background, after answering from memory.
+  assert.equal(h.renderer.available().ok, true)
+  await new Promise((r) => setTimeout(r, 0))
   assert.equal(h.renderer.available().ok, false)
   assert.deepEqual(ask(), first, 'same answer, byte for byte')
 

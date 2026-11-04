@@ -181,7 +181,7 @@ if have_cellmath then
       vim.o.termguicolors = true
       vim.env.AR_TERM_RENDER_IMAGES = "1"
       terminal.invalidate()
-      plugin.setup({ ar_term_render = ar, node = node, cellmath = cellmath })
+      plugin.setup({ ar_term_render = ar, node = node, cellmath = cellmath, persistent = false })
     end)
 
     after_each(function()

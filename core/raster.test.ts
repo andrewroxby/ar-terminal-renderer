@@ -141,3 +141,23 @@ test('a figure root with its own x, y, width and height still lands in its place
   assert.equal(pixel(p, l.left + 2, l.top + 2), '51,102,153,255')
   rmSync(dir, { recursive: true })
 })
+
+test('a caller-set limit cuts a slow sync render short without remembering a failure', opts, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-r-'))
+  const bin = mkdtempSync(join(tmpdir(), 'artr-bin-'))
+  writeFileSync(join(bin, 'rsvg-convert'), '#!/bin/sh\nexec sleep 3\n', { mode: 0o755 })
+  const saved = process.env.PATH
+  process.env.PATH = `${bin}:/bin:/usr/bin`
+  try {
+    const o = ro(GOOD, dir)
+    const t0 = Date.now()
+    assert.equal(render(o, 150), 'slow')
+    assert.ok(Date.now() - t0 < 1500)
+    assert.equal(lookup(o).state, 'miss')
+    assert.ok(!readdirSync(dir).some((f) => f.endsWith('.fail')))
+  } finally {
+    process.env.PATH = saved
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(bin, { recursive: true, force: true })
+  }
+})

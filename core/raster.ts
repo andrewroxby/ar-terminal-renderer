@@ -20,7 +20,7 @@ export function defaultCacheDir(): string {
   return join(process.env.TMPDIR || tmpdir(), 'ar-term-render')
 }
 
-// Deletes cached PNGs, failure markers and stray temp files older than
+// Deletes cached PNGs, converted sources, failure markers and stray temp files older than
 // maxAge. Returns how many went.
 export function sweep(dir: string, maxAgeMs = CACHE_MAX_AGE_MS, now = Date.now()): number {
   let n = 0
@@ -31,7 +31,7 @@ export function sweep(dir: string, maxAgeMs = CACHE_MAX_AGE_MS, now = Date.now()
     return 0
   }
   for (const name of names) {
-    if (!/\.(png|fail|tmp)$/.test(name)) continue
+    if (!/\.(png|fail|tmp|json)$/.test(name)) continue
     const p = join(dir, name)
     try {
       if (now - statSync(p).mtimeMs > maxAgeMs) {
@@ -158,7 +158,8 @@ function emptyCwd(cacheDir: string): string | null {
 }
 
 // Writes through an exclusive, randomly named temp file and renames it in.
-function store(dest: string, data: Buffer): boolean {
+// The directory must exist.
+export function store(dest: string, data: Buffer): boolean {
   const tmp = `${dest}.${randomBytes(6).toString('hex')}.tmp`
   let fd: number | undefined
   try {
@@ -193,19 +194,27 @@ function finish(p: { png: string; fail: string }, out: Buffer | null, remember: 
   return null
 }
 
-// Synchronous render; blocks for at most RSVG_TIMEOUT_MS.
-export function render(o: RasterOptions): string | null {
+// Synchronous render; blocks for at most RSVG_TIMEOUT_MS, or `limitMs` when
+// the caller has less time to give. A run that hits the caller's limit leaves
+// no failure marker and answers 'slow', so the caller can render it again
+// without a limit.
+export function render(o: RasterOptions): string | null
+export function render(o: RasterOptions, limitMs: number): string | null | 'slow'
+export function render(o: RasterOptions, limitMs?: number): string | null | 'slow' {
   const p = paths(o)
   const cwd = emptyCwd(o.cacheDir)
   if (!cwd) return null
   const j = job(o)
+  const cap = limitMs !== undefined && limitMs < RSVG_TIMEOUT_MS
   const r = spawnSync('rsvg-convert', j.args, {
     input: j.svg,
     cwd,
-    timeout: RSVG_TIMEOUT_MS,
+    timeout: cap ? Math.max(1, limitMs) : RSVG_TIMEOUT_MS,
     maxBuffer: MAX_OUT,
   })
-  const missing = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+  const error = r.error as NodeJS.ErrnoException | undefined
+  if (cap && error?.code === 'ETIMEDOUT') return 'slow'
+  const missing = error?.code === 'ENOENT'
   const ok = r.status === 0 && Buffer.isBuffer(r.stdout)
   return finish(p, ok ? (r.stdout as Buffer) : null, !missing)
 }

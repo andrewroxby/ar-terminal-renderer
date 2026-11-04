@@ -76,6 +76,50 @@ describe("graphics()", function()
   end)
 end)
 
+describe("graphics() under tmux", function()
+  local saved, dir
+
+  before_each(function()
+    saved = { vim.env.AR_TERM_RENDER_IMAGES, vim.env.TMUX, vim.env.PATH, vim.o.termguicolors }
+    dir = helpers.tmpdir()
+    vim.env.AR_TERM_RENDER_IMAGES = nil
+    vim.env.TMUX = "/tmp/x,1,0"
+    vim.o.termguicolors = true
+    vim.env.PATH = dir .. ":" .. saved[3]
+    terminal.setup({ memo_ms = 0 })
+  end)
+
+  after_each(function()
+    vim.env.AR_TERM_RENDER_IMAGES, vim.env.TMUX, vim.env.PATH, vim.o.termguicolors = saved[1], saved[2], saved[3], saved[4]
+    terminal.setup()
+    helpers.cleanup()
+  end)
+
+  -- A tmux that logs what it is asked and answers from a file.
+  local function fake_tmux(viewer)
+    local file = dir .. "/viewer"
+    local f = assert(io.open(file, "w"))
+    f:write(viewer)
+    f:close()
+    helpers.script(dir, "tmux", 'echo "$2" >> ' .. dir .. "/calls\ncat " .. file)
+    return file
+  end
+
+  it("answers from memory once the memo is old, and learns the new answer without blocking", function()
+    local file = fake_tmux("transport=local graphics=file")
+    assert.is_true(terminal.graphics())
+    assert.are.equal(1, #helpers.lines(dir .. "/calls"))
+
+    local f = assert(io.open(file, "w"))
+    f:write("transport=mosh graphics=no")
+    f:close()
+    assert.is_true(terminal.graphics(), "the old answer, at once")
+    assert(vim.wait(5000, function()
+      return not terminal.graphics()
+    end, 10), "the background lookup should land")
+  end)
+end)
+
 describe("writing", function()
   local saved_tmux
 

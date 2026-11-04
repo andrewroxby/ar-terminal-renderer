@@ -1,14 +1,38 @@
 // Terminal facts: can we draw pictures, and how big is a cell. Everything
 // goes through `run`, so tests can fake tmux. Nothing queries the terminal.
 
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { INDENT, MATH_INDENT, type Cell } from './layout.ts'
 
 export type Run = (cmd: string, args: string[]) => string | null
+export type RunAsync = (cmd: string, args: string[]) => Promise<string | null>
 
 export const defaultRun: Run = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 1500 })
   return r.status === 0 && typeof r.stdout === 'string' ? r.stdout.trim() : null
+}
+
+export const defaultRunAsync: RunAsync = (cmd, args) =>
+  new Promise((resolve) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout: 1500 }, (err, stdout) => resolve(err ? null : stdout.trim()))
+  })
+
+// The probes below are written once as generators that ask for a command's
+// output with `yield`, and run either way: straight through with a Run, or
+// without blocking with a RunAsync.
+type Step = [cmd: string, args: string[]]
+type Probe<T> = Generator<Step, T, string | null>
+
+function drive<T>(g: Probe<T>, run: Run): T {
+  let r = g.next()
+  while (!r.done) r = g.next(run(...r.value))
+  return r.value
+}
+
+async function driveAsync<T>(g: Probe<T>, run: RunAsync): Promise<T> {
+  let r = g.next()
+  while (!r.done) r = g.next(await run(...r.value))
+  return r.value
 }
 
 // mode says how image data should travel: `file` hands the terminal a path
@@ -22,7 +46,15 @@ export interface Availability {
 const KITTY_TERMS = ['ghostty', 'kitty', 'wezterm']
 
 export function detectGraphics(env: NodeJS.ProcessEnv, run: Run): Availability {
-  const a = detect(env, run)
+  return drive(probeGraphics(env), run)
+}
+
+export function detectGraphicsAsync(env: NodeJS.ProcessEnv, run: RunAsync): Promise<Availability> {
+  return driveAsync(probeGraphics(env), run)
+}
+
+function* probeGraphics(env: NodeJS.ProcessEnv): Probe<Availability> {
+  const a = yield* detect(env)
   if (!a.ok) return a
   // AR_TERM_RENDER_TRANSPORT=inline|file forces the transport.
   const forced = env.AR_TERM_RENDER_TRANSPORT
@@ -30,13 +62,13 @@ export function detectGraphics(env: NodeJS.ProcessEnv, run: Run): Availability {
   return { ...a, mode }
 }
 
-function detect(env: NodeJS.ProcessEnv, run: Run): Availability {
+function* detect(env: NodeJS.ProcessEnv): Probe<Availability> {
   const override = env.AR_TERM_RENDER_IMAGES
   if (override === '0') return { ok: false, reason: 'AR_TERM_RENDER_IMAGES=0' }
   if (override === '1') return { ok: true, reason: 'AR_TERM_RENDER_IMAGES=1', mode: 'inline' }
 
   if (env.TMUX) {
-    const viewer = run('tmux', ['show', '-gv', '@viewer'])
+    const viewer = yield ['tmux', ['show', '-gv', '@viewer']]
     if (viewer) {
       const kv = new Map(
         viewer.split(/\s+/).map((p) => {
@@ -49,7 +81,7 @@ function detect(env: NodeJS.ProcessEnv, run: Run): Availability {
       if (g === 'file' || g === 'inline') return { ok: true, reason: `viewer graphics=${g}`, mode: g }
       if (g === 'no') return { ok: false, reason: 'viewer graphics=no' }
     }
-    const term = (run('tmux', ['display', '-p', '#{client_termname}']) ?? '').toLowerCase()
+    const term = ((yield ['tmux', ['display', '-p', '#{client_termname}']]) ?? '').toLowerCase()
     return KITTY_TERMS.some((t) => term.includes(t))
       ? { ok: true, reason: `tmux client ${term}` }
       : { ok: false, reason: `tmux client ${term || 'unknown'}` }
@@ -66,7 +98,15 @@ function detect(env: NodeJS.ProcessEnv, run: Run): Availability {
 // Pixel size of one cell as reported by the attached tmux client, or null
 // when unset (headless clients report 0).
 export function tmuxCell(run: Run): Cell | null {
-  const out = run('tmux', ['display', '-p', '#{client_cell_width} #{client_cell_height}'])
+  return drive(probeCell(), run)
+}
+
+export function tmuxCellAsync(run: RunAsync): Promise<Cell | null> {
+  return driveAsync(probeCell(), run)
+}
+
+function* probeCell(): Probe<Cell | null> {
+  const out = yield ['tmux', ['display', '-p', '#{client_cell_width} #{client_cell_height}']]
   if (!out) return null
   const [w, h] = out.split(/\s+/).map(Number)
   return w && h && w > 0 && h > 0 ? { w, h } : null
