@@ -2,7 +2,7 @@
 // goes through `run`, so tests can fake tmux. Nothing queries the terminal.
 
 import { spawnSync } from 'node:child_process'
-import { INDENT, type Cell } from './layout.ts'
+import { INDENT, MATH_INDENT, type Cell } from './layout.ts'
 
 export type Run = (cmd: string, args: string[]) => string | null
 
@@ -72,13 +72,20 @@ export function tmuxCell(run: Run): Cell | null {
   return w && h && w > 0 && h > 0 ? { w, h } : null
 }
 
-// Left indent of every drawn block, in cells: AR_TERM_RENDER_INDENT as an
-// integer 0-8, else the default.
+// Left indents in cells, each an integer 0-8, else its default:
+// AR_TERM_RENDER_INDENT for figures, AR_TERM_RENDER_MATH_INDENT for math.
 export const MAX_INDENT = 8
 
-export function indentFromEnv(env: NodeJS.ProcessEnv): number {
-  const v = env.AR_TERM_RENDER_INDENT?.trim()
-  if (!v || !/^\d+$/.test(v)) return INDENT
-  const n = Number(v)
-  return n <= MAX_INDENT ? n : INDENT
+function indentVar(v: string | undefined, fallback: number): number {
+  const s = v?.trim()
+  if (!s || !/^\d+$/.test(s)) return fallback
+  const n = Number(s)
+  return n <= MAX_INDENT ? n : fallback
+}
+
+export function indentFromEnv(env: NodeJS.ProcessEnv): { figure: number; math: number } {
+  return {
+    figure: indentVar(env.AR_TERM_RENDER_INDENT, INDENT),
+    math: indentVar(env.AR_TERM_RENDER_MATH_INDENT, MATH_INDENT),
+  }
 }

@@ -474,10 +474,13 @@ test('indented fallback text and padding carry the indent', () => {
   done()
 })
 
-// The left indent: every kind sits AR_TERM_RENDER_INDENT cells in from the left
-// (default 2) as transparent space, unless that would shrink the figure.
+// The left indent: figures sit AR_TERM_RENDER_INDENT cells in from the left
+// (default 2) and math AR_TERM_RENDER_MATH_INDENT (default 3), as transparent
+// space, unless that would shrink the figure. IMG sets both to one value.
 const IMG = (indent?: number): NodeJS.ProcessEnv =>
-  indent === undefined ? { AR_TERM_RENDER_IMAGES: '1' } : { AR_TERM_RENDER_IMAGES: '1', AR_TERM_RENDER_INDENT: String(indent) }
+  indent === undefined
+    ? { AR_TERM_RENDER_IMAGES: '1' }
+    : { AR_TERM_RENDER_IMAGES: '1', AR_TERM_RENDER_INDENT: String(indent), AR_TERM_RENDER_MATH_INDENT: String(indent) }
 
 const colsOf = (out: string): number => (rowsOf(out)[0]!.match(new RegExp(PLACEHOLDER, 'gu')) ?? []).length
 
@@ -510,7 +513,7 @@ for (const [kind, small, wide] of [
 ] as const) {
   test(`indent, ${kind}: a small figure is indented by the setting, 0 turns it off`, opts, async () => {
     const flush = await colsAt(small, 80, 0)
-    assert.equal(await colsAt(small, 80), flush + 2)
+    assert.equal(await colsAt(small, 80), flush + (kind === 'math' ? 3 : 2))
     assert.equal(await colsAt(small, 80, 2), flush + 2)
     assert.equal(await colsAt(small, 80, 3), flush + 3)
   })
@@ -525,14 +528,14 @@ for (const [kind, small, wide] of [
   })
 }
 
-test('indent: a list item keeps its own indent and adds the figure indent', opts, () => {
+test('indent: a list item keeps its own indent and adds the math indent', opts, () => {
   const { r, done } = setup(IMG())
   const flush = setup(IMG(0))
   const md = `- item\n\n  ${MATH('x^2').replace(/\n/g, '\n  ')}`
   const out = r.transform(md, { width: 80 })
   const row = rowsOf(out)[0]!
   assert.ok(row.startsWith('  '))
-  assert.equal(colsOf(out), colsOf(flush.r.transform(md, { width: 80 })) + 2)
+  assert.equal(colsOf(out), colsOf(flush.r.transform(md, { width: 80 })) + 3)
   done()
   flush.done()
 })

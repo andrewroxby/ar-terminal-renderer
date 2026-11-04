@@ -35,7 +35,8 @@ logical pixels (default 32, as termtex-img's -s) and --scale the device pixel
 ratio (default 2), so one em is size x scale x 1.83 pixels. svg and mermaid
 draw at --scale pixels per drawing unit. --padding is in logical pixels.
 demo prints FILE (default: a bundled sample) through the renderer, leaving the
-images on screen; AR_TERM_RENDER_INDENT=0-8 sets the left indent in cells.`
+images on screen; AR_TERM_RENDER_INDENT=0-8 sets the figures' left indent in cells and
+AR_TERM_RENDER_MATH_INDENT=0-8 the display math's.`
 
 // Pixels of em per unit of size, matching termtex-img's -s at scale 2
 // (measured: a 16-px-size formula has a 58-px em).

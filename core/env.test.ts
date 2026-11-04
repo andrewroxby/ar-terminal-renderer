@@ -45,10 +45,13 @@ test('transport mode: file only for a local viewer, inline otherwise, env can fo
   assert.equal(detectGraphics({ ...t, AR_TERM_RENDER_TRANSPORT: 'file' }, tmuxRun('graphics=inline')).mode, 'file')
 })
 
-test('AR_TERM_RENDER_INDENT is an integer 0-8, else the default 2', () => {
-  assert.equal(indentFromEnv({}), 2)
-  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '3' }), 3)
-  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '0' }), 0)
-  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '8' }), 8)
-  for (const bad of ['9', '-1', '2.5', 'x', '']) assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: bad }), 2, bad)
+test('indents are integers 0-8, else the defaults: 2 for figures, 3 for math', () => {
+  assert.deepEqual(indentFromEnv({}), { figure: 2, math: 3 })
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '3' }).figure, 3)
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: '0' }).figure, 0)
+  assert.equal(indentFromEnv({ AR_TERM_RENDER_MATH_INDENT: '8' }).math, 8)
+  for (const bad of ['9', '-1', '2.5', 'x', '']) {
+    assert.equal(indentFromEnv({ AR_TERM_RENDER_INDENT: bad }).figure, 2, bad)
+    assert.equal(indentFromEnv({ AR_TERM_RENDER_MATH_INDENT: bad }).math, 3, bad)
+  }
 })

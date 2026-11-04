@@ -2,8 +2,8 @@
 // by 30 rows, is centered on a card padded by PAD pixels, and the card is
 // rounded up to whole cells so the placeholder grid matches the image exactly.
 //
-// Every block kind sits INDENT cells in from the left, as transparent space
-// inside the image (Markdown strips leading spaces from a paragraph, so the
+// Figures sit INDENT cells in from the left and display math MATH_INDENT
+// cells, as transparent space inside the image (Markdown strips leading spaces from a paragraph, so the
 // indent cannot be text). A block drops the indent when keeping it would
 // shrink the figure, which is when the pane is too narrow for the figure at
 // its natural size.
@@ -31,6 +31,7 @@ export const MAX_COLS = 100
 export const MAX_ROWS = 30
 export const PAD = 6
 export const INDENT = 2
+export const MATH_INDENT = 3
 export const DEFAULT_CELL: Cell = { w: 9, h: 18 }
 
 interface Fit {

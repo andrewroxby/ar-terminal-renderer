@@ -95,7 +95,7 @@ export class Renderer {
   private mermaid = new MermaidRunner()
   private env: NodeJS.ProcessEnv
   private run: Run
-  private indent: number
+  private indent: { figure: number; math: number }
   private now: () => number
   private langs: Set<string>
   private sent = new Set<number>()
@@ -240,7 +240,7 @@ export class Renderer {
     const cell = this.cell()
     const card = this.o.card?.() ?? DEFAULT_CARD
     const mathColor = this.o.mathColor?.() ?? DEFAULT_MATH
-    const indent = this.indent
+    const indent = b.kind === 'math' ? this.indent.math : this.indent.figure
     const geom = `${width}|${cell.w}x${cell.h}|${indent}|${card}|${mathColor}`
 
     let key: string

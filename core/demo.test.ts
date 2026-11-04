@@ -13,7 +13,7 @@ const CLI = fileURLToPath(new URL('./cli.ts', import.meta.url))
 function demo(args: string[], env: Record<string, string>) {
   const tmp = mkdtempSync(join(tmpdir(), 'artr-demo-'))
   const clean = { ...process.env }
-  for (const k of ['TMUX', 'TERM_PROGRAM', 'KITTY_WINDOW_ID', 'GHOSTTY_RESOURCES_DIR', 'AR_TERM_RENDER_IMAGES', 'AR_TERM_RENDER_INDENT']) delete clean[k]
+  for (const k of ['TMUX', 'TERM_PROGRAM', 'KITTY_WINDOW_ID', 'GHOSTTY_RESOURCES_DIR', 'AR_TERM_RENDER_IMAGES', 'AR_TERM_RENDER_INDENT', 'AR_TERM_RENDER_MATH_INDENT']) delete clean[k]
   const r = spawnSync('node', [CLI, 'demo', ...args], { env: { ...clean, TMPDIR: tmp, ...env }, encoding: 'utf8', timeout: 60_000 })
   rmSync(tmp, { recursive: true, force: true })
   return r
@@ -40,12 +40,12 @@ test('demo draws every block with images on: transmits come first, then rows', {
   assert.ok(out.lastIndexOf('\x1b_Ga=T') < out.indexOf(PLACEHOLDER))
 })
 
-test('demo takes a file and honors AR_TERM_RENDER_INDENT', { skip: hasRsvg ? false : 'rsvg missing' }, () => {
+test('demo takes a file and honors AR_TERM_RENDER_MATH_INDENT', { skip: hasRsvg ? false : 'rsvg missing' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'artr-demo-'))
   const f = join(dir, 'm.md')
   writeFileSync(f, 'Hi\n\n$$\nx^2\n$$\n')
   const cols = (indent: string): number => {
-    const r = demo([f], { AR_TERM_RENDER_IMAGES: '1', AR_TERM_RENDER_INDENT: indent })
+    const r = demo([f], { AR_TERM_RENDER_IMAGES: '1', AR_TERM_RENDER_MATH_INDENT: indent })
     assert.equal(r.status, 0, r.stderr)
     const row = r.stdout.split('\n').find((l) => l.includes(PLACEHOLDER))!
     return [...row].filter((c) => c === PLACEHOLDER).length

@@ -18,10 +18,10 @@ Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
   under `$TMPDIR/ar-term-render/` (7-day expiry). The card is a rect in a
   wrapper SVG, with the figure nested on it, so the page stays transparent
   to the left of the card.
-- Every block kind (card figures and math) sits `INDENT` cells in from the
-  left, 2 by default, as transparent space inside the image, because Markdown
-  strips leading spaces from a paragraph. `AR_TERM_RENDER_INDENT` (integer
-  0-8) overrides it. A block drops the indent whenever keeping it would shrink
+- Card figures sit 2 cells in from the left and display math 3, as
+  transparent space inside the image, because Markdown strips leading spaces
+  from a paragraph. `AR_TERM_RENDER_INDENT` and `AR_TERM_RENDER_MATH_INDENT`
+  (integers 0-8) override them. A block drops the indent whenever keeping it would shrink
   the figure, which is when the pane is too narrow for the figure at its
   natural size. Inside a list item the visual indent adds to the list's.
 - Kitty `a=T,U=1` transmit, each escape wrapped for tmux passthrough
@@ -90,7 +90,8 @@ MathJax load and conversion 40, rsvg 10, TS and argument handling the rest).
 and a tall Mermaid diagram, two math blocks and a code block) at the terminal
 width minus one. It waits for background renders, writes the image data, then
 prints the transformed Markdown (prose stays raw) and exits, leaving the images
-on screen. Compare indents with `AR_TERM_RENDER_INDENT=3 ar-term-render demo`.
+on screen. Compare indents with `AR_TERM_RENDER_INDENT=3 ar-term-render demo`
+(or `AR_TERM_RENDER_MATH_INDENT` for math).
 The sample has no PNG line, because the renderer draws at most three figures
 per message.
 
