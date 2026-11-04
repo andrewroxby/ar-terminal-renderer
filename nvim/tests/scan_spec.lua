@@ -1,5 +1,5 @@
 -- Scanner spec: pure-function coverage of ar_term_render.scan over the shapes math
--- actually takes in Andrew's vault prose, plus the false-positive guards.
+-- actually meets in real Markdown prose, plus the false-positive guards.
 
 local scan = require("ar_term_render.scan").scan
 

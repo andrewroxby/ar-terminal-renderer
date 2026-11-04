@@ -1,13 +1,27 @@
 # ar-term-render
 
-Draws SVG and PNG pictures and typeset math in a terminal. `core/` is the
-host-neutral engine (no Pi imports), with a CLI; `pi/` is the Pi adapter,
-`arπ-render`; `nvim/` is the Neovim adapter, `ar-term-render.nvim`.
+Draws SVG and PNG pictures, Mermaid diagrams and typeset math inline in a
+terminal, through the kitty graphics protocol. It works in kitty and Ghostty,
+and in tmux running under either. `core/` is the host-neutral engine, with a
+CLI; `pi/` is the adapter for the [Pi](https://github.com/earendil-works/pi)
+coding agent, `arπ-render`; `nvim/` is the Neovim adapter,
+`ar-term-render.nvim`.
 
-Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
+In assistant messages it draws closed ```` ```svg ```` fences, standalone
 `![caption](/abs/path.png)` lines, ```` ```mermaid ```` fences and `$$…$$` /
-`\[…\]` display math. Design and phases: the vault note
-`Projects/Tooling/implementation/Inline Figures.md`.
+`\[…\]` display math. In Neovim it draws the math in Markdown buffers.
+
+## Install
+
+- Node 22.18+ or 24.2+, and `rsvg-convert` (`brew install librsvg`, or your
+  distribution's `librsvg2-bin`).
+- Clone the repo anywhere. The bundled libraries are committed, so no
+  `npm install` is needed to run it, only to run the tests.
+- Pi: add the checkout's `pi` directory to `packages` in
+  `~/.pi/agent/settings.json`, or try it once with `pi -e <checkout>/pi/index.ts`.
+- Neovim: see [Neovim](#neovim) below.
+- The CLI is `core/cli.ts`; link it onto `PATH` as `ar-term-render` if you
+  want it there.
 
 ## How it works
 
@@ -33,7 +47,8 @@ Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
   same lock). `AR_TERM_RENDER_TRANSPORT` forces `inline` or `file`. The
   Markdown gets Unicode placeholder rows whose foreground color is the image
   id. No terminal queries are ever sent.
-- Availability: `tmux show -gv @viewer` (`graphics=file|inline` draws), else
+- Availability: the tmux option `@viewer`, if a script keeps it current with
+  a line such as `transport=ssh graphics=inline` (`graphics=file|inline` draws), else
   the tmux client terminal, else Ghostty/kitty outside tmux.
   `AR_TERM_RENDER_IMAGES=0|1` overrides. Fallback text is `[figure: title]` or
   `[image: alt - path]`.
@@ -142,9 +157,8 @@ per message.
 
 ## Pi
 
-Load with `pi -e ~/dev/ar-term-render/pi/index.ts` (nothing is installed into
-settings). `/render on|off|redraw|status`. A `tmux wait-for viewer-changed`
-watcher resends images when tmux-viewer reports a new client. When graphics
+`/render on|off|redraw|status`. A `tmux wait-for viewer-changed` watcher
+resends images when a new client attaches, if something signals that channel. When graphics
 are available, `before_agent_start` appends one guidance line
 (`core/guidance.ts`) to the system prompt.
 
@@ -161,7 +175,7 @@ runtime path:
 
 ```lua
 {
-  dir = vim.fn.expand("~/dev/ar-term-render/nvim"),
+  dir = "/path/to/ar-term-render/nvim",
   name = "ar-term-render.nvim",
   ft = "markdown",
   config = function()
@@ -245,3 +259,9 @@ measure the speed budgets (see `bench/README.md`).
 `python3 pi/test/live-check.py` runs a live Pi in a private tmux server
 (`-L figproto`) with a cheap Fireworks model; it needs `rsvg-convert`, `tmux`
 and API keys in `~/.pi/agent/auth.json`.
+
+## License
+
+MIT, in `LICENSE`. The bundled libraries keep their own licenses (MIT,
+Apache-2.0, EPL-2.0 and BSD-2-Clause), listed with their texts in
+`THIRD-PARTY-NOTICES.md`.
