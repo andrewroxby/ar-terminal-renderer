@@ -417,6 +417,20 @@ test('math that would have to shrink below legibility is left as text', opts, ()
   done()
 })
 
+test('a conversion does not start on the render path with too little budget left', opts, async () => {
+  let ready!: () => void
+  const wait = new Promise<void>((res) => (ready = res))
+  const { r, done } = setup({ AR_TERM_RENDER_IMAGES: '1' }, { budgetMs: 3, onReady: () => ready() })
+  const md = MATH('a = b + d')
+  assert.equal(r.transform(md, { width: 80 }), md)
+  assert.equal(r.pending(), true)
+  // The conversion has not run yet: it writes its cache entry when it does.
+  assert.ok(!existsSync(r.cacheDir) || !readdirSync(r.cacheDir).some((f) => f.startsWith('s-')))
+  await wait
+  assert.ok(rowsOf(r.transform(md, { width: 80 })).length >= 1)
+  done()
+})
+
 test('past the budget math waits, is left as text, then draws in the background', opts, async () => {
   let ready!: () => void
   const wait = new Promise<void>((res) => (ready = res))
@@ -722,6 +736,36 @@ test('graphics detection: first answer is direct, later ones refresh in the back
   // recheck() is the direct way.
   viewer = 'graphics=inline'
   assert.equal(r.recheck().ok, true)
+  done()
+})
+
+test('a lookup that started before recheck() cannot overwrite its newer answer', async () => {
+  let clock = 0
+  let viewer = 'graphics=no'
+  let release!: () => void
+  const held = new Promise<void>((res) => (release = res))
+  const answer = (args: string[]) => (args.includes('@viewer') ? viewer : '9 20')
+  const { r, done } = setup(
+    { TMUX: '/tmp/x,1,0' },
+    {
+      now: () => clock,
+      run: (_c, a) => answer(a),
+      // The first background lookup reads the old state and lands late.
+      runAsync: async (_c, a) => {
+        const seen = answer(a)
+        await held
+        return seen
+      },
+    },
+  )
+  assert.equal(r.available().ok, false)
+  clock += 3000
+  r.available()
+  viewer = 'graphics=inline'
+  assert.equal(r.recheck().ok, true)
+  release()
+  await new Promise((res) => setTimeout(res, 5))
+  assert.equal(r.available().ok, true)
   done()
 })
 

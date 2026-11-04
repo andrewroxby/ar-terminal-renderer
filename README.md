@@ -39,8 +39,9 @@ Draws, in assistant messages: closed ```` ```svg ```` fences, standalone
   `[image: alt - path]`.
 
 Rendering is budgeted. Synchronous work (conversion and rsvg) stays within
-~300 ms: no new render starts with less than 100 ms left, a started one is cut
-off at what remains, and the budget refills after 500 ms without sync work, so
+~300 ms: no new render starts with less than 100 ms left, no conversion with
+less than 5 ms (50 ms while MathJax is unloaded), a started render is cut off
+at what remains, and the budget refills after 500 ms without sync work, so
 a burst of messages (a resumed transcript) shares one budget. Whatever misses
 it shows its fallback text and renders in the background, three at a time, and
 the Pi adapter asks the TUI to rebuild as they land. rsvg failures are
@@ -57,8 +58,10 @@ size are looked up with tmux once, then refreshed in the background
 inside a frame after the first.
 
 Conversions are cached on disk as well as PNGs: `s-<key>.json` holds the SVG a
-formula or Mermaid diagram converted to, keyed on the inputs and the bundle's
-size and mtime, so a new process (or a resumed session) that meets a known
+formula or Mermaid diagram converted to, keyed on the inputs, the bundles'
+size and mtime, and a hash of the converter sources (`math.ts`, `svg.ts`,
+`cssvars.ts`, `mermaid.ts`), so editing one retires old entries. A hit is
+sanitized again on read. A new process (or a resumed session) that meets a known
 formula never loads MathJax and a known diagram never starts the layout worker.
 Bench numbers: `bench/README.md`.
 

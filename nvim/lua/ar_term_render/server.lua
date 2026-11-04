@@ -9,7 +9,8 @@
 -- Callers hear back through cb(res), where res is { path = "..." }, or
 -- { error = "...", rejected = bool } for a formula the renderer answered
 -- about, or { unavailable = true, error = "..." } when the server cannot be
--- used at all (an old renderer without `serve`, a binary that is not one).
+-- used at all (an old renderer without `serve`, a binary that is not one) or
+-- was stopped with the request in flight.
 -- The caller then runs the renderer one formula at a time instead.
 
 local uv = vim.uv
@@ -21,10 +22,11 @@ local ATTEMPTS = 2
 -- No answer for this long means the server is stuck; it is killed.
 local WATCHDOG_MS = 20000
 
+-- The running process's handle, and its instance: the output buffers and
+-- identity that callbacks check, so a killed process's late output is ignored.
 local proc = nil
+local cur = nil
 local started_with = nil
-local out_buf = ""
-local err_buf = ""
 -- True once this process has answered anything.
 local proven = false
 local broken = nil
@@ -90,16 +92,18 @@ end
 
 -- The server ended. Requests it had not answered go to a new one, or to the
 -- caller's fallback when this one never worked or they have used their tries.
-local function ended(code, signal, mine)
-  if proc ~= mine then
+local function ended(code, signal, inst)
+  if cur ~= inst then
     return
   end
   proc = nil
+  cur = nil
   stop_watchdog()
   local lost = inflight
   inflight = {}
   if not proven then
-    broken = vim.trim(err_buf) ~= "" and vim.trim(err_buf) or ("exit " .. tostring(code or signal))
+    local err = vim.trim(inst.err)
+    broken = err ~= "" and err or ("exit " .. tostring(code or signal))
   end
   local retry = {}
   for _, req in pairs(lost) do
@@ -132,27 +136,30 @@ local function ended(code, signal, mine)
 end
 
 start = function(argv)
-  out_buf, err_buf, proven = "", "", false
+  proven = false
   local cmd = vim.list_extend(vim.deepcopy(argv), { "serve" })
-  local mine
+  local inst = { out = "", err = "" }
   local ok, handle = pcall(vim.system, cmd, {
     stdin = true,
     stdout = function(_, data)
       if not data then
         return
       end
-      out_buf = out_buf .. data
+      inst.out = inst.out .. data
       local lines = {}
       while true do
-        local nl = out_buf:find("\n", 1, true)
+        local nl = inst.out:find("\n", 1, true)
         if not nl then
           break
         end
-        lines[#lines + 1] = out_buf:sub(1, nl - 1)
-        out_buf = out_buf:sub(nl + 1)
+        lines[#lines + 1] = inst.out:sub(1, nl - 1)
+        inst.out = inst.out:sub(nl + 1)
       end
       if #lines > 0 then
         vim.schedule(function()
+          if cur ~= inst then
+            return
+          end
           for _, line in ipairs(lines) do
             answer(line)
           end
@@ -160,21 +167,21 @@ start = function(argv)
       end
     end,
     stderr = function(_, data)
-      if data and #err_buf < 4000 then
-        err_buf = err_buf .. data
+      if data and #inst.err < 4000 then
+        inst.err = inst.err .. data
       end
     end,
   }, function(res)
     vim.schedule(function()
-      ended(res.code, res.signal, mine)
+      ended(res.code, res.signal, inst)
     end)
   end)
   if not ok then
     broken = tostring(handle)
     return false
   end
-  mine = handle
   proc = handle
+  cur = inst
   started_with = argv
   return true
 end
@@ -191,11 +198,7 @@ function M.request(argv, params, cb)
   if proc and table.concat(started_with, "\0") ~= table.concat(argv, "\0") then
     -- A different renderer was configured; what the old one holds goes to the
     -- caller's fallback.
-    local lost = inflight
     M.stop()
-    for _, req in pairs(lost) do
-      req.cb({ unavailable = true, error = "the renderer changed" })
-    end
   end
   if not proc and not start(argv) then
     cb({ unavailable = true, error = broken })
@@ -213,24 +216,57 @@ function M.request(argv, params, cb)
   end
 end
 
---- Stops the server. Work in flight is dropped without an answer.
-function M.stop()
+-- Kills the process and takes its work in flight, oldest first. The state is
+-- consistent before any callback runs, so a callback may ask again.
+local function drop()
   stop_watchdog()
   local p = proc
   proc = nil
+  cur = nil
+  local lost = inflight
   inflight = {}
   if p then
     pcall(function()
       p:kill(15)
     end)
   end
+  local ordered = {}
+  for _, req in pairs(lost) do
+    ordered[#ordered + 1] = req
+  end
+  table.sort(ordered, function(a, b)
+    return a.id < b.id
+  end)
+  return ordered
 end
 
---- Forgets that the server failed, so the next request tries it again.
+-- Tells each request that the server cannot answer it, which sends its
+-- caller to the one-run-per-formula fallback.
+local function give_back(lost)
+  for _, req in ipairs(lost) do
+    req.cb({ unavailable = true, error = "the renderer server was stopped" })
+  end
+end
+
+--- Stops the server. Work in flight is answered as unavailable, so callers
+--- finish it another way.
+function M.stop()
+  give_back(drop())
+end
+
+--- Stops the server and drops its work in flight without an answer, for
+--- when the editor is exiting and nothing should start again.
+function M.shutdown()
+  drop()
+end
+
+--- Forgets that the server failed, so the next request tries it again. Work
+--- in flight is answered as in stop().
 function M.reset()
-  M.stop()
+  local lost = drop()
   broken = nil
   proven = false
+  give_back(lost)
 end
 
 --- Whether a server process is running, for tests and diagnostics.

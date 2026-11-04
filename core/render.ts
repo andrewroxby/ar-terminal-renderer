@@ -8,7 +8,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } fro
 import { DEFAULT_CARD, DEFAULT_MATH } from './color.ts'
 import { defaultRun, defaultRunAsync, detectGraphics, detectGraphicsAsync, indentFromEnv, tmuxCell, tmuxCellAsync, type Availability, type Run, type RunAsync } from './env.ts'
 import { DEFAULT_CELL, layout as computeLayout, layoutMath, type Cell, type Layout } from './layout.ts'
-import { mathToSvg } from './math.ts'
+import { mathLoaded, mathToSvg } from './math.ts'
 import { MermaidRunner, mermaidAvailable, mermaidStamp, refuseMermaid } from './mermaid.ts'
 import { placeholderRows, transmit, transmitFile } from './kitty.ts'
 import { tryLock } from './lock.ts'
@@ -28,6 +28,11 @@ const RASTER_BUDGET_MS = 300
 // budget refills after this long without sync work, so a burst of messages
 // (a resumed transcript) shares one budget instead of each taking its own.
 const MIN_SYNC_MS = 100
+// A conversion starts on the render path only with at least this much budget
+// left: its slowest warm run measured about 5 ms, and loading MathJax about
+// 45 ms. Otherwise it runs in the background.
+const MIN_CONVERT_MS = 5
+const MIN_CONVERT_COLD_MS = 50
 const BUDGET_WINDOW_MS = 500
 const MEMO_TTL_MS = 2000
 const MAX_RESEND = 30
@@ -137,6 +142,9 @@ export class Renderer {
   private done = new Lru<string, Done>(MSG_CAP, (_k, d) => (this.doneChars -= d.chars))
   private doneChars = 0
   private availMemo: { at: number; v: Availability } | null = null
+  // Bumped when the memos are dropped, so a background lookup that started
+  // before cannot overwrite a newer answer.
+  private lookupGen = 0
   private cellMemo: { at: number; v: Cell } | null = null
   private nextId: number
   private spent = 0
@@ -189,6 +197,7 @@ export class Renderer {
   // Looks at the terminal again now, for a decision that should not rest on
   // an answer up to MEMO_TTL_MS old.
   recheck(): Availability {
+    this.lookupGen++
     this.availMemo = null
     return this.available()
   }
@@ -206,10 +215,12 @@ export class Renderer {
   private refresh(): void {
     if (this.refreshing) return
     this.refreshing = true
+    const gen = this.lookupGen
     const o = this.o
     const run: RunAsync = o.runAsync ?? (o.run ? async (c, a) => o.run!(c, a) : defaultRunAsync)
     void Promise.all([detectGraphicsAsync(this.env, run), this.env.TMUX ? tmuxCellAsync(run) : null])
       .then(([a, c]) => {
+        if (gen !== this.lookupGen) return
         const t = this.now()
         const cell = this.usableCell(c)
         const was = [this.availMemo?.v, this.cellMemo?.v] as const
@@ -294,6 +305,7 @@ export class Renderer {
   // late or a terminal that lost its store. Returns how many were sent.
   redraw(): number {
     this.sent.clear()
+    this.lookupGen++
     this.availMemo = null
     this.cellMemo = null
     this.lockMissed = false
@@ -470,7 +482,7 @@ export class Renderer {
         })
         return PENDING
       }
-      if (expensive && this.spent >= this.budget()) {
+      if (expensive && this.budget() - this.spent < (mathLoaded() ? MIN_CONVERT_MS : MIN_CONVERT_COLD_MS)) {
         // Convert and rasterize later, off the render path.
         this.enqueue(key, async () => {
           const made = make()

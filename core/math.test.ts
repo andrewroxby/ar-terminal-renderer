@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +15,7 @@ test('every common display expression renders to a sized svg', () => {
   const failed: string[] = []
   for (const [name, tex] of Object.entries(MATH_CASES)) {
     const m = mathToSvg(tex, '#dddddd')
-    if (!m || !/^<svg color="#dddddd"/.test(m.svg) || !(m.vw > 0 && m.vh > 0)) failed.push(name)
+    if (!m || !/^<svg\b[^>]*\scolor="#dddddd"/.test(m.svg) || !(m.vw > 0 && m.vh > 0)) failed.push(name)
   }
   assert.deepEqual(failed, [])
   assert.ok(Object.keys(MATH_CASES).length >= 30)
@@ -149,6 +149,23 @@ test('with a cache directory, a conversion is stored and read back, refusals too
   assert.equal(mathToSvg('\\frac{1}{', '#abcdef', true, dir), null)
   assert.ok(readdirSync(dir).some((f) => f.startsWith('m-') && f.endsWith('.fail')))
   assert.equal(mathToSvg('\\frac{1}{', '#abcdef', true, dir), null)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a cached conversion is sanitized again on read', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-m-'))
+  const tex = 'a + b'
+  assert.ok(mathToSvg(tex, '#abcdef', true, dir))
+  const file = join(dir, readdirSync(dir).find((f) => f.startsWith('s-'))!)
+  const entry = JSON.parse(readFileSync(file, 'utf8')) as { svg: string }
+  entry.svg = entry.svg.replace(/<g /, '<image href="file:///etc/passwd" width="1" height="1"/><script>x</script><g ')
+  writeFileSync(file, JSON.stringify(entry))
+  const hit = mathToSvg(tex, '#abcdef', true, dir)!
+  assert.ok(hit)
+  assert.doesNotMatch(hit.svg, /passwd|<script/)
+  // An oversized or non-SVG entry is a miss, and the conversion is redone.
+  writeFileSync(file, JSON.stringify({ svg: 'not an svg', vw: 1, vh: 1, title: '' }))
+  assert.match(mathToSvg(tex, '#abcdef', true, dir)!.svg, /^<svg\b/)
   rmSync(dir, { recursive: true, force: true })
 })
 

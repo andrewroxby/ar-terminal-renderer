@@ -120,6 +120,61 @@ describe("graphics() under tmux", function()
   end)
 end)
 
+describe("graphics() lookups that overlap an invalidation", function()
+  local saved, dir
+
+  before_each(function()
+    saved = { vim.env.AR_TERM_RENDER_IMAGES, vim.env.TMUX, vim.env.PATH, vim.o.termguicolors }
+    dir = helpers.tmpdir()
+    vim.env.AR_TERM_RENDER_IMAGES = nil
+    vim.env.TMUX = "/tmp/x,1,0"
+    vim.o.termguicolors = true
+    vim.env.PATH = dir .. ":" .. saved[3]
+    terminal.setup({ memo_ms = 0 })
+  end)
+
+  after_each(function()
+    vim.env.AR_TERM_RENDER_IMAGES, vim.env.TMUX, vim.env.PATH, vim.o.termguicolors = saved[1], saved[2], saved[3], saved[4]
+    terminal.setup()
+    helpers.cleanup()
+  end)
+
+  local function set_viewer(text)
+    local f = assert(io.open(dir .. "/viewer", "w"))
+    f:write(text)
+    f:close()
+  end
+
+  it("keeps the newer answer when an older background lookup lands after it", function()
+    -- tmux reads its answer at once but, while `slow` exists, delivers it late.
+    helpers.script(dir, "tmux", 'v=$(cat ' .. dir .. '/viewer)\n[ -e ' .. dir .. '/slow ] && sleep 0.4\necho "$v"')
+    set_viewer("graphics=file")
+    assert.is_true(terminal.graphics())
+
+    set_viewer("graphics=no")
+    vim.fn.writefile({}, dir .. "/slow")
+    assert.is_true(terminal.graphics(), "the old answer, while the slow lookup runs")
+
+    set_viewer("graphics=file")
+    os.remove(dir .. "/slow")
+    terminal.invalidate()
+    assert.is_true(terminal.graphics(), "a direct lookup after the invalidation")
+
+    vim.wait(800)
+    assert.is_true(terminal.graphics(), "the stale lookup must not overwrite it")
+  end)
+
+  it("looks up a tmux client terminal in the background when the viewer line is silent", function()
+    helpers.script(dir, "tmux", 'if [ "$1" = show ]; then exit 0; fi\necho xterm-ghostty')
+    assert.is_true(terminal.graphics())
+    helpers.script(dir, "tmux", 'if [ "$1" = show ]; then exit 0; fi\necho xterm-256color')
+    assert.is_true(terminal.graphics())
+    assert(vim.wait(5000, function()
+      return not terminal.graphics()
+    end, 10), "the two-step background lookup should land")
+  end)
+end)
+
 describe("writing", function()
   local saved_tmux
 

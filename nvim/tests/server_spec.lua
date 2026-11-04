@@ -3,6 +3,7 @@
 
 local helpers = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h") .. "/helpers.lua")
 local image = require("ar_term_render.image")
+local queue = require("ar_term_render.queue")
 local server = require("ar_term_render.server")
 local terminal = require("ar_term_render.terminal")
 
@@ -125,6 +126,25 @@ describe("the renderer server", function()
     assert.are.equal(2, #helpers.lines(ran), "reset lets it try again")
   end)
 
+  it("ignores what a stopped server writes late", function()
+    -- A server that never answers and, when killed, answers every id with a stale path.
+    local stale = {
+      helpers.script(
+        dir,
+        "stale",
+        [[trap 'i=1; while [ $i -le 500 ]; do printf "{\"id\":%d,\"path\":\"/stale\"}\n" $i; i=$((i+1)); done; exit 0' TERM
+while :; do sleep 0.05; done]]
+      ),
+    }
+    server.request(stale, { tex = "a" }, function() end)
+    vim.wait(200)
+    local other = helpers.tmpdir()
+    local results = ask(fake(other), 3)
+    for i, res in ipairs(results) do
+      assert.are.equal(vim.env.FAKE_PNG, res.path, "request " .. i)
+    end
+  end)
+
   it("sends requests to a new process when the renderer command changes", function()
     local a = fake(dir)
     ask(a, 1)
@@ -188,6 +208,23 @@ if have_cli and have_rsvg then
       end, 20), "the idle server should exit")
       assert(render("b^2", true))
       assert.are.same({ "serve", "serve" }, helpers.lines(log))
+    end)
+
+    it("draws every formula when setup() runs again mid-render", function()
+      local drawn, total = 0, 10
+      for i = 1, total do
+        image.render("x_{" .. i .. "}^2", true, 40, function(img)
+          if img then
+            drawn = drawn + 1
+          end
+        end)
+      end
+      image.setup({ ar_bin = bin })
+      assert(vim.wait(30000, function()
+        return queue.stats().keys == 0
+      end, 20), "the queue never drained")
+      assert.are.equal(total, drawn)
+      assert.are.same({ running = 0, pending = 0, keys = 0 }, queue.stats())
     end)
 
     it("falls back to one run per formula when persistent is off", function()

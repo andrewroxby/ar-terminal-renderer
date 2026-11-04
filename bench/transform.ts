@@ -31,10 +31,16 @@ function renderer(cacheDir: string, extra: Partial<ConstructorParameters<typeof 
 }
 
 async function settle(r: Renderer, text: string): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    r.transform(text, { width: WIDTH })
-    if (!r.pending()) return
-    await r.idle()
+  // The renderer's background timer is unref'd, so something must hold the loop.
+  const hold = setInterval(() => {}, 1000)
+  try {
+    for (let i = 0; i < 40; i++) {
+      r.transform(text, { width: WIDTH })
+      if (!r.pending()) return
+      await r.idle()
+    }
+  } finally {
+    clearInterval(hold)
   }
 }
 

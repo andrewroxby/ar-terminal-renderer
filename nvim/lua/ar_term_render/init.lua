@@ -757,7 +757,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       image.delete_all()
-      server.stop()
+      server.shutdown()
     end,
   })
   api.nvim_create_user_command("ArRender", command, {

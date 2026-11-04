@@ -93,6 +93,48 @@ local function default_run(cmd, args)
   return nil
 end
 
+-- The detection rules, in continuation-passing style so the same code runs
+-- with blocking commands and with commands that answer later. `ask(cmd, args,
+-- k)` calls k with the command's trimmed stdout, or nil when it fails;
+-- `finish` gets the result.
+local function detect_with(env, ask, finish)
+  local override = env.AR_TERM_RENDER_IMAGES
+  if override == "0" then
+    return finish({ ok = false, reason = "AR_TERM_RENDER_IMAGES=0" })
+  elseif override == "1" then
+    return finish({ ok = true, reason = "AR_TERM_RENDER_IMAGES=1" })
+  end
+
+  if env.TMUX and env.TMUX ~= "" then
+    return ask("tmux", { "show", "-gv", "@viewer" }, function(viewer)
+      if viewer and viewer ~= "" then
+        local kv = {}
+        for part in viewer:gmatch("%S+") do
+          local k, v = part:match("^([^=]*)=(.*)$")
+          kv[k or part] = v or ""
+        end
+        if kv.transport == "none" then
+          return finish({ ok = false, reason = "no viewer attached" })
+        elseif kv.graphics == "file" or kv.graphics == "inline" then
+          return finish({ ok = true, reason = "viewer graphics=" .. kv.graphics })
+        elseif kv.graphics == "no" then
+          return finish({ ok = false, reason = "viewer graphics=no" })
+        end
+      end
+      ask("tmux", { "display", "-p", "#{client_termname}" }, function(out)
+        local term = (out or ""):lower()
+        finish({ ok = mentions_kitty_term(term), reason = "tmux client " .. (term ~= "" and term or "unknown") })
+      end)
+    end)
+  end
+
+  local ok = env.KITTY_WINDOW_ID ~= nil
+    or env.GHOSTTY_RESOURCES_DIR ~= nil
+    or mentions_kitty_term((env.TERM or "") .. " " .. (env.TERM_PROGRAM or ""))
+    or (env.TERM_PROGRAM or ""):lower() == "herdr"
+  finish({ ok = ok, reason = ok and "kitty-graphics terminal" or "terminal not recognized" })
+end
+
 --- Whether a terminal draws kitty graphics, by the same rules as
 --- core/env.ts (the shared vectors in core/test/detect-vectors.json hold
 --- both to them):
@@ -106,80 +148,54 @@ end
 --- @param run fun(cmd: string, args: string[]): string|nil
 --- @return table { ok: boolean, reason: string }
 function M.detect(env, run)
-  local override = env.AR_TERM_RENDER_IMAGES
-  if override == "0" then
-    return { ok = false, reason = "AR_TERM_RENDER_IMAGES=0" }
-  elseif override == "1" then
-    return { ok = true, reason = "AR_TERM_RENDER_IMAGES=1" }
-  end
-
-  if env.TMUX and env.TMUX ~= "" then
-    local viewer = run("tmux", { "show", "-gv", "@viewer" })
-    if viewer and viewer ~= "" then
-      local kv = {}
-      for part in viewer:gmatch("%S+") do
-        local k, v = part:match("^([^=]*)=(.*)$")
-        kv[k or part] = v or ""
-      end
-      if kv.transport == "none" then
-        return { ok = false, reason = "no viewer attached" }
-      elseif kv.graphics == "file" or kv.graphics == "inline" then
-        return { ok = true, reason = "viewer graphics=" .. kv.graphics }
-      elseif kv.graphics == "no" then
-        return { ok = false, reason = "viewer graphics=no" }
-      end
-    end
-    local term = (run("tmux", { "display", "-p", "#{client_termname}" }) or ""):lower()
-    return { ok = mentions_kitty_term(term), reason = "tmux client " .. (term ~= "" and term or "unknown") }
-  end
-
-  local ok = env.KITTY_WINDOW_ID ~= nil
-    or env.GHOSTTY_RESOURCES_DIR ~= nil
-    or mentions_kitty_term((env.TERM or "") .. " " .. (env.TERM_PROGRAM or ""))
-    or (env.TERM_PROGRAM or ""):lower() == "herdr"
-  return { ok = ok, reason = ok and "kitty-graphics terminal" or "terminal not recognized" }
+  local result
+  detect_with(env, function(cmd, args, k)
+    return k(run(cmd, args))
+  end, function(res)
+    result = res
+  end)
+  return result
 end
 
 local memo = nil
 local refreshing = false
+-- Bumped when the memo is dropped, so a lookup that started earlier cannot
+-- overwrite a newer answer.
+local generation = 0
 
 local function now_ms()
   return uv.hrtime() / 1e6
 end
 
 function M.invalidate()
+  generation = generation + 1
   memo = nil
 end
 
 -- `detect` again with commands that wait on the event loop instead of
--- blocking it, so a tmux that answers slowly cannot stall the editor. The
--- detection reads like straight-line code; each command yields until its
--- answer arrives.
+-- blocking it, so a tmux that answers slowly cannot stall the editor.
 local function refresh_async()
   if refreshing then
     return
   end
   refreshing = true
-  local co
-  local function run(cmd, args)
+  local started = generation
+  local function ask(cmd, args, k)
     local ok = pcall(vim.system, vim.list_extend({ cmd }, args), { text = true }, function(res)
       vim.schedule(function()
-        coroutine.resume(co, res.code == 0 and res.stdout and vim.trim(res.stdout) or nil)
+        k(res.code == 0 and res.stdout and vim.trim(res.stdout) or nil)
       end)
     end)
     if not ok then
-      return nil
+      k(nil)
     end
-    return coroutine.yield()
   end
-  co = coroutine.create(function()
-    local ok, res = pcall(M.detect, vim.env, run)
+  detect_with(vim.env, ask, function(res)
     refreshing = false
-    if ok and memo then
+    if started == generation and memo then
       memo = { at = now_ms(), v = res.ok }
     end
   end)
-  coroutine.resume(co)
 end
 
 --- Whether to draw images now. Placeholder cells carry the image id in a

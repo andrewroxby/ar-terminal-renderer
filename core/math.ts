@@ -26,6 +26,12 @@ function load(): MathBundle | null {
   return bundle
 }
 
+// Whether MathJax is already loaded, so a conversion costs milliseconds
+// rather than the load.
+export function mathLoaded(): boolean {
+  return Boolean(bundle)
+}
+
 const MAX_TEX = 8000
 
 // MathJax runs without equation numbering, so a \tag becomes trailing text.
@@ -71,7 +77,7 @@ function convert(mj: MathBundle, tex: string, display: boolean, color: string): 
   }
   // Attribute syntax only, so \text{href} still draws.
   if (/\shref\s*=/i.test(raw)) return null
-  const clean = sanitizeSvg(raw, MAX_CONVERTED_BYTES)
-  if (!clean) return null
-  return { ...clean, svg: clean.svg.replace(/^<svg\b/, `<svg color="${color}"`) }
+  // The color goes in before sanitizing, so a cached copy sanitized again on
+  // read comes back identical.
+  return sanitizeSvg(raw.replace(/^<svg\b/, `<svg color="${color}"`), MAX_CONVERTED_BYTES)
 }
