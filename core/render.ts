@@ -64,7 +64,7 @@ interface Source {
   maxScale: number
 }
 
-// A fence kind the renderer knows. Later phases add entries here.
+// A fence kind the renderer knows. New kinds get an entry here.
 interface FenceKind {
   lang: string
   // Text to show when the figure is not drawn; null leaves the fence as is.
