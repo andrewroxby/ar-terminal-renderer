@@ -27,7 +27,7 @@ declare module '@earendil-works/pi-coding-agent' {
     ): void
     registerCommand(
       name: string,
-      options: { description?: string; handler: (args: string, ctx: ExtensionContext) => Promise<void> | void },
+      options: { description?: string; handler: (args: string, ctx: ExtensionContext) => Promise<void> },
     ): void
   }
 }

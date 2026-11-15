@@ -135,7 +135,7 @@ export function install(pi: ExtensionAPI, deps: Deps = {}): Renderer {
 
   pi.registerCommand('render', {
     description: 'Inline figures: /render on|off|redraw|status',
-    handler: (args, ctx) => {
+    handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase()
       if (arg === 'on' || arg === 'off') {
         renderer.enabled = arg === 'on'
