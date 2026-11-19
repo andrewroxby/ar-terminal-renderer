@@ -142,6 +142,25 @@ test('a figure root with its own x, y, width and height still lands in its place
   rmSync(dir, { recursive: true })
 })
 
+test('a render that times out on a busy machine is not remembered as a failure, sync or async', opts, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'artr-r-'))
+  const bin = mkdtempSync(join(tmpdir(), 'artr-bin-'))
+  writeFileSync(join(bin, 'rsvg-convert'), '#!/bin/sh\nexec sleep 3\n', { mode: 0o755 })
+  const saved = process.env.PATH
+  process.env.PATH = `${bin}:/bin:/usr/bin`
+  try {
+    const o = ro(GOOD, dir)
+    assert.equal(render(o), null)
+    assert.equal(await renderAsync(o), null)
+    assert.equal(lookup(o).state, 'miss')
+    assert.ok(!readdirSync(dir).some((f) => f.endsWith('.fail')))
+  } finally {
+    process.env.PATH = saved
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(bin, { recursive: true, force: true })
+  }
+})
+
 test('a caller-set limit cuts a slow sync render short without remembering a failure', opts, () => {
   const dir = mkdtempSync(join(tmpdir(), 'artr-r-'))
   const bin = mkdtempSync(join(tmpdir(), 'artr-bin-'))

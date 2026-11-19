@@ -186,8 +186,8 @@ function markFailed(failPath: string): void {
   store(failPath, Buffer.alloc(0))
 }
 
-// A missing rsvg-convert is not a property of the figure, so it is never
-// remembered as a failure.
+// A missing rsvg-convert or a timeout (a busy machine) is not a property of
+// the figure, so neither is remembered as a failure.
 function finish(p: { png: string; fail: string }, out: Buffer | null, remember: boolean): string | null {
   if (out && out.length >= 8 && store(p.png, out)) return p.png
   if (remember) markFailed(p.fail)
@@ -214,9 +214,9 @@ export function render(o: RasterOptions, limitMs?: number): string | null | 'slo
   })
   const error = r.error as NodeJS.ErrnoException | undefined
   if (cap && error?.code === 'ETIMEDOUT') return 'slow'
-  const missing = error?.code === 'ENOENT'
+  const transient = error?.code === 'ENOENT' || error?.code === 'ETIMEDOUT'
   const ok = r.status === 0 && Buffer.isBuffer(r.stdout)
-  return finish(p, ok ? (r.stdout as Buffer) : null, !missing)
+  return finish(p, ok ? (r.stdout as Buffer) : null, !transient)
 }
 
 // Same render without blocking the event loop.
@@ -227,7 +227,7 @@ export function renderAsync(o: RasterOptions): Promise<string | null> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
-    let missing = false
+    let transient = false
     let settled = false
     const j = job(o)
     const child = spawn('rsvg-convert', j.args, { cwd, stdio: ['pipe', 'pipe', 'ignore'] })
@@ -235,14 +235,15 @@ export function renderAsync(o: RasterOptions): Promise<string | null> {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve(finish(p, out, !missing))
+      resolve(finish(p, out, !transient))
     }
     const timer = setTimeout(() => {
+      transient = true
       child.kill('SIGKILL')
       done(null)
     }, RSVG_TIMEOUT_MS)
     child.on('error', (e) => {
-      missing = (e as NodeJS.ErrnoException).code === 'ENOENT'
+      transient = (e as NodeJS.ErrnoException).code === 'ENOENT'
       done(null)
     })
     child.stdout.on('data', (d: Buffer) => {
